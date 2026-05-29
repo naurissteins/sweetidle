@@ -65,6 +65,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sweetsidle-core"
+version = "0.1.0"
+dependencies = [
+ "sweetsidle-config",
+]
+
+[[package]]
 name = "unicode-width"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"

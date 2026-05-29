@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/sweetsidle-config",
+    "crates/sweetsidle-core",
     "crates/sweetsidle",
 ]
 
@@ -23,3 +24,4 @@ unwrap_used = "deny"
 [workspace.dependencies]
 kdl = { version = "6.5", default-features = false }
 sweetsidle-config = { path = "crates/sweetsidle-config" }
+sweetsidle-core = { path = "crates/sweetsidle-core" }
