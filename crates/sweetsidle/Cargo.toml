@@ -1,0 +1,11 @@
+[package]
+name = "sweetsidle"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Recommended idle management daemon for the Sweets compositor"
+
+[lints]
+workspace = true

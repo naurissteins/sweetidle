@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+if command -v cargo-deny >/dev/null 2>&1; then
+  cargo_deny="cargo-deny"
+elif [[ -x "$HOME/.cargo/bin/cargo-deny" ]]; then
+  cargo_deny="$HOME/.cargo/bin/cargo-deny"
+else
+  echo "cargo-deny is required for dependency checks." >&2
+  echo "Install it with: cargo install cargo-deny --locked" >&2
+  exit 127
+fi
+
+"$cargo_deny" check --allow license-not-encountered advisories bans licenses sources

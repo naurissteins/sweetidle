@@ -1,0 +1,19 @@
+/target
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local environment
+.env
+.env.*
+
+# Logs and crash artifacts
+*.log
+core
+
+# Local run state
+*.sock
+*.pid
