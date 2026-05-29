@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/sweetsidle-config",
     "crates/sweetsidle",
 ]
 
@@ -18,3 +19,7 @@ unsafe_code = "deny"
 dbg_macro = "deny"
 todo = "deny"
 unwrap_used = "deny"
+
+[workspace.dependencies]
+kdl = { version = "6.5", default-features = false }
+sweetsidle-config = { path = "crates/sweetsidle-config" }

@@ -1,0 +1,14 @@
+[package]
+name = "sweetsidle-config"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Configuration parsing and validation for sweetsidle"
+
+[dependencies]
+kdl.workspace = true
+
+[lints]
+workspace = true

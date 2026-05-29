@@ -1,0 +1,16 @@
+general {
+  lock-command "sweetslock"
+  before-sleep-command "sweetslock --daemonize"
+  after-resume-command "sweetsmsg output '*' power on"
+  ignore-dbus-inhibit #false
+  ignore-systemd-inhibit #false
+}
+
+listener timeout=300 {
+  on-timeout "sweetslock"
+}
+
+listener timeout=600 {
+  on-timeout "sweetsmsg output '*' power off"
+  on-resume "sweetsmsg output '*' power on"
+}
