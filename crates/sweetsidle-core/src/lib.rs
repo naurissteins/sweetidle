@@ -6,6 +6,10 @@ use sweetsidle_config::Config;
 pub struct ListenerId(usize);
 
 impl ListenerId {
+    pub fn from_index(index: usize) -> Self {
+        Self(index)
+    }
+
     pub fn index(self) -> usize {
         self.0
     }

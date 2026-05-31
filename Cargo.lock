@@ -58,6 +58,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sweetsidle-command"
+version = "0.1.0"
+dependencies = [
+ "sweetsidle-core",
+]
+
+[[package]]
 name = "sweetsidle-config"
 version = "0.1.0"
 dependencies = [
