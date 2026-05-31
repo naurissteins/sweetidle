@@ -2,6 +2,12 @@ use std::{error::Error, fmt};
 
 use sweetsidle_core::{CommandIntent, CommandKind, ListenerId};
 
+mod process;
+
+pub use process::{
+    ProcessAdapter, ProcessCompletion, ProcessError, ProcessStart, RunningProcessInfo,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CommandId(usize);
 
