@@ -11,7 +11,7 @@ pub struct ProcessAdapter {
     running: Vec<RunningProcess>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessStart {
     pub command_id: CommandId,
     pub process_id: u32,
