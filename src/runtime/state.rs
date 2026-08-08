@@ -3,7 +3,7 @@ use std::{collections::HashSet, io};
 use calloop::{Interest, LoopHandle, Mode, PostAction, generic::Generic};
 use rustix::process::{Pid, PidfdFlags, pidfd_open};
 
-use super::{RuntimeError, RuntimeEvent};
+use super::{RuntimeError, RuntimeEvent, ShutdownSignal};
 use crate::{
     command::{CommandDispatcher, CommandId, DispatchDecision, ProcessAdapter, ProcessStart},
     listener::{CommandIntent, ListenerSet},
@@ -19,6 +19,7 @@ pub(super) struct RuntimeState {
     ready_processes: Vec<CommandId>,
     completed_before_monitor: HashSet<CommandId>,
     runtime_events: Vec<RuntimeEvent>,
+    shutdown: Option<ShutdownSignal>,
 }
 
 impl RuntimeState {
@@ -32,6 +33,7 @@ impl RuntimeState {
             ready_processes: Vec::new(),
             completed_before_monitor: HashSet::new(),
             runtime_events: Vec::new(),
+            shutdown: None,
         }
     }
 
@@ -119,6 +121,20 @@ impl RuntimeState {
         std::mem::take(&mut self.runtime_events)
     }
 
+    pub(super) fn request_shutdown(&mut self, signal: ShutdownSignal) {
+        if self.shutdown.is_some() {
+            return;
+        }
+
+        self.shutdown = Some(signal);
+        self.runtime_events
+            .push(RuntimeEvent::ShutdownRequested(signal));
+    }
+
+    pub(super) fn shutdown_requested(&self) -> bool {
+        self.shutdown.is_some()
+    }
+
     fn route_idle_event(&mut self, event: IdleEvent) -> Result<(), RuntimeError> {
         match event {
             IdleEvent::Idled(listener_id) => {
@@ -186,7 +202,7 @@ mod tests {
     use crate::{
         config::{Config, GeneralConfig, ListenerConfig},
         listener::{CommandIntent, CommandKind, ListenerError, ListenerId, ListenerSet},
-        runtime::{RuntimeError, RuntimeEvent},
+        runtime::{RuntimeError, RuntimeEvent, ShutdownSignal},
         wayland::{IdleEvent, IdleWaylandState},
     };
 
@@ -247,6 +263,20 @@ mod tests {
             Err(RuntimeError::Listener(ListenerError::UnknownListener(
                 listener_id
             ))) if listener_id == ListenerId::from_index(9)
+        ));
+    }
+
+    #[test]
+    fn records_only_the_first_shutdown_signal() {
+        let mut state = runtime_state();
+
+        state.request_shutdown(ShutdownSignal::Interrupt);
+        state.request_shutdown(ShutdownSignal::Terminate);
+
+        assert!(state.shutdown_requested());
+        assert!(matches!(
+            state.take_runtime_events().as_slice(),
+            [RuntimeEvent::ShutdownRequested(ShutdownSignal::Interrupt)]
         ));
     }
 

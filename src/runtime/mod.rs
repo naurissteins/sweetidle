@@ -1,4 +1,5 @@
 mod error;
+mod shutdown;
 mod state;
 
 use std::time::Duration;
@@ -7,8 +8,9 @@ use calloop::EventLoop;
 use calloop_wayland_source::WaylandSource;
 
 pub use error::RuntimeError;
+pub use shutdown::ShutdownSignal;
 
-use self::state::RuntimeState;
+use self::{shutdown::register_sources, state::RuntimeState};
 use crate::{
     command::{FinishedCommand, ProcessCompletion, ProcessError, ProcessStart, SkipDecision},
     config::Config,
@@ -18,6 +20,7 @@ use crate::{
 
 #[derive(Debug)]
 pub enum RuntimeEvent {
+    ShutdownRequested(ShutdownSignal),
     CommandStarted(ProcessStart),
     CommandSkipped(SkipDecision),
     CommandFinished {
@@ -49,6 +52,7 @@ impl IdleRuntime {
                 event_queue.dispatch_pending(&mut state.wayland)
             })
             .map_err(|error| RuntimeError::RegisterWayland(error.error))?;
+        register_sources(&event_loop.handle())?;
 
         Ok(Self {
             event_loop,
@@ -64,6 +68,12 @@ impl IdleRuntime {
             .dispatch(timeout, &mut self.state)
             .map_err(RuntimeError::Dispatch)?;
         self.state.collect_ready_processes()?;
+
+        if self.state.shutdown_requested() {
+            self.state.wayland.take_events();
+            return Ok(self.state.take_runtime_events());
+        }
+
         self.state.route_wayland_events()?;
         self.state
             .dispatch_command_intents(&self.event_loop.handle())?;
