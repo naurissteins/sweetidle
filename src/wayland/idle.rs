@@ -20,11 +20,9 @@ pub enum IdleEvent {
 
 #[derive(Debug)]
 pub struct IdleWaylandConnection {
+    connection: Connection,
     event_queue: EventQueue<IdleWaylandState>,
     state: IdleWaylandState,
-    _notifier: ExtIdleNotifierV1,
-    _seat: wl_seat::WlSeat,
-    _notifications: Vec<ExtIdleNotificationV1>,
 }
 
 impl IdleWaylandConnection {
@@ -40,11 +38,9 @@ impl IdleWaylandConnection {
         connection.flush().map_err(IdleWaylandError::Flush)?;
 
         Ok(Self {
+            connection,
             event_queue,
-            state: IdleWaylandState::default(),
-            _notifier: notifier,
-            _seat: seat,
-            _notifications: notifications,
+            state: IdleWaylandState::new(notifier, seat, notifications),
         })
     }
 
@@ -55,6 +51,20 @@ impl IdleWaylandConnection {
 
         Ok(self.state.take_events())
     }
+
+    pub(crate) fn into_parts(self) -> IdleWaylandParts {
+        IdleWaylandParts {
+            connection: self.connection,
+            event_queue: self.event_queue,
+            state: self.state,
+        }
+    }
+}
+
+pub(crate) struct IdleWaylandParts {
+    pub(crate) connection: Connection,
+    pub(crate) event_queue: EventQueue<IdleWaylandState>,
+    pub(crate) state: IdleWaylandState,
 }
 
 #[derive(Debug)]
@@ -121,16 +131,32 @@ impl Error for IdleWaylandError {
 }
 
 #[derive(Debug, Default)]
-struct IdleWaylandState {
+pub(crate) struct IdleWaylandState {
     events: Vec<IdleEvent>,
+    _notifier: Option<ExtIdleNotifierV1>,
+    _seat: Option<wl_seat::WlSeat>,
+    _notifications: Vec<ExtIdleNotificationV1>,
 }
 
 impl IdleWaylandState {
-    fn record(&mut self, event: IdleEvent) {
+    fn new(
+        notifier: ExtIdleNotifierV1,
+        seat: wl_seat::WlSeat,
+        notifications: Vec<ExtIdleNotificationV1>,
+    ) -> Self {
+        Self {
+            events: Vec::new(),
+            _notifier: Some(notifier),
+            _seat: Some(seat),
+            _notifications: notifications,
+        }
+    }
+
+    pub(crate) fn record(&mut self, event: IdleEvent) {
         self.events.push(event);
     }
 
-    fn take_events(&mut self) -> Vec<IdleEvent> {
+    pub(crate) fn take_events(&mut self) -> Vec<IdleEvent> {
         std::mem::take(&mut self.events)
     }
 }
