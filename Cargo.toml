@@ -8,6 +8,8 @@ repository = "https://github.com/naurissteins/sweetsidle"
 description = "Recommended idle management daemon for the Sweets compositor"
 
 [dependencies]
+calloop = "0.14"
+calloop-wayland-source = "0.4"
 kdl = { version = "6.5", default-features = false }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
