@@ -4,7 +4,7 @@ use std::{
     process::{Child, Command, ExitStatus, Stdio},
 };
 
-use crate::{CommandId, SpawnRequest};
+use super::{CommandId, SpawnRequest};
 
 #[derive(Debug, Default)]
 pub struct ProcessAdapter {
@@ -159,9 +159,8 @@ struct RunningProcess {
 mod tests {
     use std::{thread, time::Duration};
 
-    use sweetsidle_core::{CommandKind, ListenerId};
-
-    use crate::{CommandId, ProcessAdapter, SpawnRequest};
+    use super::{CommandId, ProcessAdapter, SpawnRequest};
+    use crate::listener::{CommandKind, ListenerId};
 
     #[test]
     fn spawns_and_collects_a_finished_command() {
@@ -208,7 +207,7 @@ mod tests {
 
         assert_eq!(
             processes.running_processes(),
-            vec![crate::RunningProcessInfo {
+            vec![super::RunningProcessInfo {
                 command_id: CommandId(2),
                 process_id: start.process_id
             }]
@@ -226,7 +225,7 @@ mod tests {
         }
     }
 
-    fn wait_for_completion(processes: &mut ProcessAdapter) -> Vec<crate::ProcessCompletion> {
+    fn wait_for_completion(processes: &mut ProcessAdapter) -> Vec<super::ProcessCompletion> {
         for _ in 0..50 {
             let completions = match processes.collect_finished() {
                 Ok(completions) => completions,

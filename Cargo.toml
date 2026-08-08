@@ -1,29 +1,19 @@
-[workspace]
-resolver = "2"
-members = [
-    "crates/sweetsidle-command",
-    "crates/sweetsidle-config",
-    "crates/sweetsidle-core",
-    "crates/sweetsidle",
-]
-
-[workspace.package]
+[package]
+name = "sweetsidle"
 version = "0.1.0"
 edition = "2024"
 authors = ["Nauris Steins"]
 license = "GPL-3.0-or-later"
 repository = "https://github.com/naurissteins/sweetsidle"
+description = "Recommended idle management daemon for the Sweets compositor"
 
-[workspace.lints.rust]
+[dependencies]
+kdl = { version = "6.5", default-features = false }
+
+[lints.rust]
 unsafe_code = "deny"
 
-[workspace.lints.clippy]
+[lints.clippy]
 dbg_macro = "deny"
 todo = "deny"
 unwrap_used = "deny"
-
-[workspace.dependencies]
-kdl = { version = "6.5", default-features = false }
-sweetsidle-command = { path = "crates/sweetsidle-command" }
-sweetsidle-config = { path = "crates/sweetsidle-config" }
-sweetsidle-core = { path = "crates/sweetsidle-core" }
