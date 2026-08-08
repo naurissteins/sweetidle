@@ -1,4 +1,4 @@
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, io};
 
 use crate::{
     command::{CommandDispatchError, CommandId, ProcessError},
@@ -11,6 +11,18 @@ pub enum RuntimeError {
     Wayland(IdleWaylandError),
     CreateEventLoop(calloop::Error),
     RegisterWayland(calloop::Error),
+    CreateSignalPipe {
+        signal: &'static str,
+        source: io::Error,
+    },
+    RegisterSignalHandler {
+        signal: &'static str,
+        source: io::Error,
+    },
+    RegisterSignalSource {
+        signal: &'static str,
+        source: calloop::Error,
+    },
     Dispatch(calloop::Error),
     Listener(ListenerError),
     Process(ProcessError),
@@ -41,6 +53,18 @@ impl fmt::Display for RuntimeError {
                 write!(
                     formatter,
                     "failed to register Wayland event source: {source}"
+                )
+            }
+            Self::CreateSignalPipe { signal, source } => {
+                write!(formatter, "failed to create {signal} signal pipe: {source}")
+            }
+            Self::RegisterSignalHandler { signal, source } => {
+                write!(formatter, "failed to register {signal} handler: {source}")
+            }
+            Self::RegisterSignalSource { signal, source } => {
+                write!(
+                    formatter,
+                    "failed to register {signal} event source: {source}"
                 )
             }
             Self::Dispatch(source) => write!(formatter, "event loop dispatch failed: {source}"),
@@ -88,6 +112,10 @@ impl Error for RuntimeError {
             | Self::RegisterWayland(source)
             | Self::Dispatch(source)
             | Self::RegisterProcessMonitor { source, .. } => Some(source),
+            Self::CreateSignalPipe { source, .. } | Self::RegisterSignalHandler { source, .. } => {
+                Some(source)
+            }
+            Self::RegisterSignalSource { source, .. } => Some(source),
             Self::Process(source) => Some(source),
             Self::CommandDispatch(source) => Some(source),
             Self::MonitorProcess { source, .. } => Some(source),
