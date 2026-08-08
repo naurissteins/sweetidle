@@ -67,7 +67,7 @@ fn check_config_file(path: Option<std::path::PathBuf>) -> Result<(), String> {
 
     let source = std::fs::read_to_string(&path)
         .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
-    let config = sweetsidle_config::Config::parse(&source)
+    let config = sweetsidle::config::Config::parse(&source)
         .map_err(|error| format!("invalid config `{}`: {error}", path.display()))?;
 
     println!("configuration ok: {} listener(s)", config.listeners.len());

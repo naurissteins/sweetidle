@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use sweetsidle_config::Config;
+use crate::config::Config;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ListenerId(usize);
@@ -142,9 +142,8 @@ enum ListenerPhase {
 mod tests {
     use std::time::Duration;
 
-    use sweetsidle_config::{Config, GeneralConfig, ListenerConfig};
-
     use super::{CommandIntent, CommandKind, ListenerError, ListenerId, ListenerSet};
+    use crate::config::{Config, GeneralConfig, ListenerConfig};
 
     #[test]
     fn exposes_timeout_requests_in_config_order() {

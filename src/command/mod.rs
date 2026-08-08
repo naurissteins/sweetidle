@@ -1,6 +1,6 @@
 use std::{error::Error, fmt};
 
-use sweetsidle_core::{CommandIntent, CommandKind, ListenerId};
+use crate::listener::{CommandIntent, CommandKind, ListenerId};
 
 mod process;
 
@@ -152,12 +152,11 @@ struct RunningCommand {
 
 #[cfg(test)]
 mod tests {
-    use sweetsidle_core::{CommandIntent, CommandKind, ListenerId};
-
     use super::{
         CommandDispatchError, CommandDispatcher, CommandId, DispatchDecision, FinishedCommand,
         SkipDecision, SkipReason, SpawnRequest,
     };
+    use crate::listener::{CommandIntent, CommandKind, ListenerId};
 
     #[test]
     fn dispatch_creates_spawn_requests_with_stable_ids() {
