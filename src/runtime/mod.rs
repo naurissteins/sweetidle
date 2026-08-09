@@ -15,7 +15,7 @@ use crate::{
     command::{FinishedCommand, ProcessCompletion, ProcessError, ProcessStart, SkipDecision},
     config::Config,
     listener::ListenerSet,
-    session::LogindMonitor,
+    session::{LogindFeatures, LogindMonitor},
     wayland::IdleWaylandConnection,
 };
 
@@ -24,6 +24,8 @@ pub enum RuntimeEvent {
     ShutdownRequested(ShutdownSignal),
     PreparingForSleep,
     ResumedFromSleep,
+    LockRequested,
+    UnlockRequested,
     CommandStarted(ProcessStart),
     CommandSkipped(SkipDecision),
     CommandFinished {
@@ -93,11 +95,11 @@ fn register_logind(
     config: &Config,
     event_loop: &EventLoop<'static, RuntimeState>,
 ) -> Result<Option<LogindMonitor>, RuntimeError> {
-    let Some(use_delay_inhibitor) = logind_delay_policy(config) else {
+    let Some(features) = logind_features(config) else {
         return Ok(None);
     };
 
-    let (monitor, source) = LogindMonitor::connect(use_delay_inhibitor)?;
+    let (monitor, source) = LogindMonitor::connect(features)?;
     event_loop
         .handle()
         .insert_source(source, |event, _, state: &mut RuntimeState| match event {
@@ -109,18 +111,24 @@ fn register_logind(
     Ok(Some(monitor))
 }
 
-fn logind_delay_policy(config: &Config) -> Option<bool> {
+fn logind_features(config: &Config) -> Option<LogindFeatures> {
     let has_before_sleep = config.general.before_sleep_command.is_some();
     let has_after_resume = config.general.after_resume_command.is_some();
+    let session_events = config.general.lock_command.is_some();
+    let sleep_events = has_before_sleep || has_after_resume;
 
-    (has_before_sleep || has_after_resume)
-        .then_some(has_before_sleep && config.general.wait_before_sleep)
+    (sleep_events || session_events).then_some(LogindFeatures {
+        sleep_events,
+        delay_inhibitor: has_before_sleep && config.general.wait_before_sleep,
+        session_events,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::logind_delay_policy;
+    use super::logind_features;
     use crate::config::Config;
+    use crate::session::LogindFeatures;
 
     #[test]
     fn starts_logind_without_an_inhibitor_for_fire_and_forget_hooks() {
@@ -128,11 +136,33 @@ mod tests {
         config.general.before_sleep_command = Some("lock".to_string());
         config.general.wait_before_sleep = false;
 
-        assert_eq!(logind_delay_policy(&config), Some(false));
+        assert_eq!(
+            logind_features(&config),
+            Some(LogindFeatures {
+                sleep_events: true,
+                delay_inhibitor: false,
+                session_events: false,
+            })
+        );
     }
 
     #[test]
-    fn skips_logind_when_no_sleep_hooks_are_configured() {
-        assert_eq!(logind_delay_policy(&Config::default()), None);
+    fn starts_logind_for_a_lock_command_without_sleep_monitoring() {
+        let mut config = Config::default();
+        config.general.lock_command = Some("lock".to_string());
+
+        assert_eq!(
+            logind_features(&config),
+            Some(LogindFeatures {
+                sleep_events: false,
+                delay_inhibitor: false,
+                session_events: true,
+            })
+        );
+    }
+
+    #[test]
+    fn skips_logind_when_no_session_hooks_are_configured() {
+        assert_eq!(logind_features(&Config::default()), None);
     }
 }

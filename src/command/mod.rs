@@ -30,6 +30,7 @@ pub enum CommandContext {
         listener_id: ListenerId,
         kind: CommandKind,
     },
+    Lock,
     BeforeSleep,
     AfterResume,
 }
@@ -228,18 +229,22 @@ mod tests {
     }
 
     #[test]
-    fn sleep_hooks_have_independent_command_slots() {
+    fn session_commands_have_independent_command_slots() {
         let mut dispatcher = CommandDispatcher::default();
 
         assert!(matches!(
-            dispatcher.dispatch_command(CommandContext::BeforeSleep, "lock".to_string()),
+            dispatcher.dispatch_command(CommandContext::Lock, "lock".to_string()),
+            DispatchDecision::Spawn(_)
+        ));
+        assert!(matches!(
+            dispatcher.dispatch_command(CommandContext::BeforeSleep, "prepare".to_string()),
             DispatchDecision::Spawn(_)
         ));
         assert!(matches!(
             dispatcher.dispatch_command(CommandContext::AfterResume, "outputs on".to_string()),
             DispatchDecision::Spawn(_)
         ));
-        assert_eq!(dispatcher.running_count(), 2);
+        assert_eq!(dispatcher.running_count(), 3);
     }
 
     #[test]
