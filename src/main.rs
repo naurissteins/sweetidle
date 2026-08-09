@@ -136,6 +136,14 @@ fn log_runtime_event(event: RuntimeEvent) -> bool {
             info!("system resumed from sleep");
             false
         }
+        RuntimeEvent::LockRequested => {
+            info!("session lock requested");
+            false
+        }
+        RuntimeEvent::UnlockRequested => {
+            info!("session unlock requested");
+            false
+        }
         RuntimeEvent::CommandStarted(start) => {
             info!(
                 command_id = start.command_id.index(),

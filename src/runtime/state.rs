@@ -23,6 +23,7 @@ pub(super) struct RuntimeState {
     listeners: ListenerSet,
     command_intents: Vec<CommandIntent>,
     session_command_intents: Vec<SessionCommandIntent>,
+    lock_command: Option<String>,
     before_sleep_command: Option<String>,
     after_resume_command: Option<String>,
     session_events: Vec<SessionEvent>,
@@ -44,6 +45,7 @@ impl RuntimeState {
             listeners,
             command_intents: Vec::new(),
             session_command_intents: Vec::new(),
+            lock_command: config.general.lock_command.clone(),
             before_sleep_command: config.general.before_sleep_command.clone(),
             after_resume_command: config.general.after_resume_command.clone(),
             session_events: Vec::new(),
@@ -167,6 +169,19 @@ impl RuntimeState {
                             inhibitor: None,
                         });
                     }
+                }
+                SessionEvent::LockRequested => {
+                    self.runtime_events.push(RuntimeEvent::LockRequested);
+                    if let Some(command) = self.lock_command.clone() {
+                        self.session_command_intents.push(SessionCommandIntent {
+                            context: CommandContext::Lock,
+                            command,
+                            inhibitor: None,
+                        });
+                    }
+                }
+                SessionEvent::UnlockRequested => {
+                    self.runtime_events.push(RuntimeEvent::UnlockRequested);
                 }
                 SessionEvent::Failed(error) => return Err(RuntimeError::Session(error)),
             }
@@ -459,6 +474,42 @@ mod tests {
                 inhibitor: None,
             }] if command == "outputs on"
         ));
+    }
+
+    #[test]
+    fn routes_lock_request_to_the_configured_command() {
+        let mut state = runtime_state();
+        state.lock_command = Some("lock session".to_string());
+        state.record_session_event(SessionEvent::LockRequested);
+
+        assert_runtime_ok(state.route_session_events());
+
+        assert!(matches!(
+            state.take_runtime_events().as_slice(),
+            [RuntimeEvent::LockRequested]
+        ));
+        assert!(matches!(
+            state.session_command_intents.as_slice(),
+            [SessionCommandIntent {
+                context: CommandContext::Lock,
+                command,
+                inhibitor: None,
+            }] if command == "lock session"
+        ));
+    }
+
+    #[test]
+    fn records_unlock_without_queuing_a_command() {
+        let mut state = runtime_state();
+        state.record_session_event(SessionEvent::UnlockRequested);
+
+        assert_runtime_ok(state.route_session_events());
+
+        assert!(matches!(
+            state.take_runtime_events().as_slice(),
+            [RuntimeEvent::UnlockRequested]
+        ));
+        assert!(state.session_command_intents.is_empty());
     }
 
     #[test]
