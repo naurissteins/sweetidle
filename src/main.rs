@@ -128,9 +128,18 @@ fn log_runtime_event(event: RuntimeEvent) -> bool {
             info!(signal = signal.name(), "shutdown requested");
             true
         }
+        RuntimeEvent::PreparingForSleep => {
+            info!("preparing for system sleep");
+            false
+        }
+        RuntimeEvent::ResumedFromSleep => {
+            info!("system resumed from sleep");
+            false
+        }
         RuntimeEvent::CommandStarted(start) => {
             info!(
                 command_id = start.command_id.index(),
+                context = ?start.context,
                 process_id = start.process_id,
                 "command started"
             );
@@ -138,8 +147,7 @@ fn log_runtime_event(event: RuntimeEvent) -> bool {
         }
         RuntimeEvent::CommandSkipped(decision) => {
             debug!(
-                listener = decision.listener_id.index(),
-                kind = ?decision.kind,
+                context = ?decision.context,
                 reason = ?decision.reason,
                 "command skipped"
             );
@@ -149,27 +157,18 @@ fn log_runtime_event(event: RuntimeEvent) -> bool {
             command,
             completion,
         } => {
-            let fields = (
-                command.command_id.index(),
-                command.listener_id.index(),
-                command.kind,
-                completion.status.code(),
-            );
-
             if completion.status.success() {
                 info!(
-                    command_id = fields.0,
-                    listener = fields.1,
-                    kind = ?fields.2,
-                    exit_code = ?fields.3,
+                    command_id = command.command_id.index(),
+                    context = ?command.context,
+                    exit_code = ?completion.status.code(),
                     "command finished"
                 );
             } else {
                 warn!(
-                    command_id = fields.0,
-                    listener = fields.1,
-                    kind = ?fields.2,
-                    exit_code = ?fields.3,
+                    command_id = command.command_id.index(),
+                    context = ?command.context,
+                    exit_code = ?completion.status.code(),
                     "command exited unsuccessfully"
                 );
             }
@@ -181,8 +180,7 @@ fn log_runtime_event(event: RuntimeEvent) -> bool {
             };
             error!(
                 command_id = command.command_id.index(),
-                listener = command.listener_id.index(),
-                kind = ?command.kind,
+                context = ?command.context,
                 error = %source,
                 "command failed"
             );

@@ -20,9 +20,18 @@ impl CommandId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnRequest {
     pub command_id: CommandId,
-    pub listener_id: ListenerId,
-    pub kind: CommandKind,
+    pub context: CommandContext,
     pub command: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CommandContext {
+    Listener {
+        listener_id: ListenerId,
+        kind: CommandKind,
+    },
+    BeforeSleep,
+    AfterResume,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,8 +42,7 @@ pub enum DispatchDecision {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkipDecision {
-    pub listener_id: ListenerId,
-    pub kind: CommandKind,
+    pub context: CommandContext,
     pub reason: SkipReason,
 }
 
@@ -46,8 +54,7 @@ pub enum SkipReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinishedCommand {
     pub command_id: CommandId,
-    pub listener_id: ListenerId,
-    pub kind: CommandKind,
+    pub context: CommandContext,
     pub command: String,
 }
 
@@ -64,15 +71,25 @@ pub struct CommandDispatcher {
 
 impl CommandDispatcher {
     pub fn dispatch(&mut self, intent: CommandIntent) -> DispatchDecision {
-        let slot = CommandSlot {
-            listener_id: intent.listener_id,
-            kind: intent.kind,
-        };
+        self.dispatch_command(
+            CommandContext::Listener {
+                listener_id: intent.listener_id,
+                kind: intent.kind,
+            },
+            intent.command,
+        )
+    }
+
+    pub fn dispatch_command(
+        &mut self,
+        context: CommandContext,
+        command: String,
+    ) -> DispatchDecision {
+        let slot = CommandSlot { context };
 
         if let Some(command) = self.running.iter().find(|command| command.slot == slot) {
             return DispatchDecision::Skip(SkipDecision {
-                listener_id: slot.listener_id,
-                kind: slot.kind,
+                context: slot.context,
                 reason: SkipReason::AlreadyRunning(command.command_id),
             });
         }
@@ -83,14 +100,13 @@ impl CommandDispatcher {
         self.running.push(RunningCommand {
             command_id,
             slot,
-            command: intent.command.clone(),
+            command: command.clone(),
         });
 
         DispatchDecision::Spawn(SpawnRequest {
             command_id,
-            listener_id: slot.listener_id,
-            kind: slot.kind,
-            command: intent.command,
+            context: slot.context,
+            command,
         })
     }
 
@@ -110,8 +126,7 @@ impl CommandDispatcher {
 
         Ok(FinishedCommand {
             command_id,
-            listener_id: command.slot.listener_id,
-            kind: command.slot.kind,
+            context: command.slot.context,
             command: command.command,
         })
     }
@@ -139,8 +154,7 @@ impl Error for CommandDispatchError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CommandSlot {
-    listener_id: ListenerId,
-    kind: CommandKind,
+    context: CommandContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,8 +167,8 @@ struct RunningCommand {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommandDispatchError, CommandDispatcher, CommandId, DispatchDecision, FinishedCommand,
-        SkipDecision, SkipReason, SpawnRequest,
+        CommandContext, CommandDispatchError, CommandDispatcher, CommandId, DispatchDecision,
+        FinishedCommand, SkipDecision, SkipReason, SpawnRequest,
     };
     use crate::listener::{CommandIntent, CommandKind, ListenerId};
 
@@ -166,8 +180,7 @@ mod tests {
             dispatcher.dispatch(intent(0, CommandKind::Timeout, "lock")),
             DispatchDecision::Spawn(SpawnRequest {
                 command_id: CommandId(0),
-                listener_id: ListenerId::from_index(0),
-                kind: CommandKind::Timeout,
+                context: listener_context(0, CommandKind::Timeout),
                 command: "lock".to_string()
             })
         );
@@ -175,8 +188,7 @@ mod tests {
             dispatcher.dispatch(intent(1, CommandKind::Timeout, "dpms off")),
             DispatchDecision::Spawn(SpawnRequest {
                 command_id: CommandId(1),
-                listener_id: ListenerId::from_index(1),
-                kind: CommandKind::Timeout,
+                context: listener_context(1, CommandKind::Timeout),
                 command: "dpms off".to_string()
             })
         );
@@ -194,8 +206,7 @@ mod tests {
         assert_eq!(
             dispatcher.dispatch(intent(0, CommandKind::Timeout, "lock again")),
             DispatchDecision::Skip(SkipDecision {
-                listener_id: ListenerId::from_index(0),
-                kind: CommandKind::Timeout,
+                context: listener_context(0, CommandKind::Timeout),
                 reason: SkipReason::AlreadyRunning(CommandId(0))
             })
         );
@@ -217,6 +228,21 @@ mod tests {
     }
 
     #[test]
+    fn sleep_hooks_have_independent_command_slots() {
+        let mut dispatcher = CommandDispatcher::default();
+
+        assert!(matches!(
+            dispatcher.dispatch_command(CommandContext::BeforeSleep, "lock".to_string()),
+            DispatchDecision::Spawn(_)
+        ));
+        assert!(matches!(
+            dispatcher.dispatch_command(CommandContext::AfterResume, "outputs on".to_string()),
+            DispatchDecision::Spawn(_)
+        ));
+        assert_eq!(dispatcher.running_count(), 2);
+    }
+
+    #[test]
     fn finish_releases_the_command_slot() {
         let mut dispatcher = CommandDispatcher::default();
 
@@ -228,8 +254,7 @@ mod tests {
             dispatcher.finish(CommandId(0)),
             Ok(FinishedCommand {
                 command_id: CommandId(0),
-                listener_id: ListenerId::from_index(0),
-                kind: CommandKind::Timeout,
+                context: listener_context(0, CommandKind::Timeout),
                 command: "lock".to_string()
             })
         );
@@ -255,6 +280,13 @@ mod tests {
             listener_id: ListenerId::from_index(listener_index),
             kind,
             command: command.to_string(),
+        }
+    }
+
+    fn listener_context(listener_index: usize, kind: CommandKind) -> CommandContext {
+        CommandContext::Listener {
+            listener_id: ListenerId::from_index(listener_index),
+            kind,
         }
     }
 }

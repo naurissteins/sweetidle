@@ -2,6 +2,7 @@ general {
   lock-command "sweetslock"
   before-sleep-command "sweetslock --daemonize"
   after-resume-command "sweetsmsg output '*' power on"
+  wait-before-sleep #true
   ignore-dbus-inhibit #false
   ignore-systemd-inhibit #false
 }

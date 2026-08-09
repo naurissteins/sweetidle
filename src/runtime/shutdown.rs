@@ -143,8 +143,9 @@ mod tests {
             Ok(event_loop) => event_loop,
             Err(error) => panic!("failed to create test event loop: {error}"),
         };
-        let listeners = ListenerSet::from_config(&Config::default());
-        let mut state = RuntimeState::new(IdleWaylandState::default(), listeners);
+        let config = Config::default();
+        let listeners = ListenerSet::from_config(&config);
+        let mut state = RuntimeState::new(IdleWaylandState::default(), listeners, &config);
 
         if let Err(error) = register_sources(&event_loop.handle()) {
             panic!("failed to register signal sources: {error}");
