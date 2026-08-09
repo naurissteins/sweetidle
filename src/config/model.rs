@@ -4,13 +4,27 @@ pub struct Config {
     pub listeners: Vec<ListenerConfig>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneralConfig {
     pub lock_command: Option<String>,
     pub before_sleep_command: Option<String>,
     pub after_resume_command: Option<String>,
+    pub wait_before_sleep: bool,
     pub ignore_dbus_inhibit: bool,
     pub ignore_systemd_inhibit: bool,
+}
+
+impl Default for GeneralConfig {
+    fn default() -> Self {
+        Self {
+            lock_command: None,
+            before_sleep_command: None,
+            after_resume_command: None,
+            wait_before_sleep: true,
+            ignore_dbus_inhibit: false,
+            ignore_systemd_inhibit: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

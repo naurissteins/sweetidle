@@ -103,6 +103,10 @@ fn parse_general(node: &KdlNode) -> Result<GeneralConfig, ConfigError> {
                 seen.insert("general", field)?;
                 config.after_resume_command = Some(required_command(field, child)?);
             }
+            "wait-before-sleep" => {
+                seen.insert("general", field)?;
+                config.wait_before_sleep = required_bool(field, child)?;
+            }
             "ignore-dbus-inhibit" => {
                 seen.insert("general", field)?;
                 config.ignore_dbus_inhibit = required_bool(field, child)?;
@@ -279,6 +283,7 @@ general {
   lock-command "sweetslock"
   before-sleep-command "sweetslock --daemonize"
   after-resume-command "sweetsmsg output '*' power on"
+  wait-before-sleep #true
   ignore-dbus-inhibit #false
   ignore-systemd-inhibit #true
 }
@@ -299,6 +304,7 @@ listener timeout=600 {
         };
 
         assert_eq!(config.general.lock_command.as_deref(), Some("sweetslock"));
+        assert!(config.general.wait_before_sleep);
         assert!(config.general.ignore_systemd_inhibit);
         assert_eq!(config.listeners.len(), 2);
         assert_eq!(config.listeners[0].timeout_seconds, 300);

@@ -8,8 +8,11 @@ repository = "https://github.com/naurissteins/sweetsidle"
 description = "Recommended idle management daemon for the Sweets compositor"
 
 [dependencies]
+async-channel = "2.5"
+async-io = "2.6"
 calloop = "0.14"
 calloop-wayland-source = "0.4"
+futures-lite = "2.6"
 kdl = { version = "6.5", default-features = false }
 rustix = { version = "1.1", features = ["linux_5_1", "process"] }
 signal-hook = { version = "0.4", default-features = false }
@@ -17,6 +20,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+zbus = "5.18"
 
 [lints.rust]
 unsafe_code = "deny"

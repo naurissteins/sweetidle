@@ -1,12 +1,20 @@
-use std::{collections::HashSet, io};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+};
 
 use calloop::{Interest, LoopHandle, Mode, PostAction, generic::Generic};
 use rustix::process::{Pid, PidfdFlags, pidfd_open};
 
 use super::{RuntimeError, RuntimeEvent, ShutdownSignal};
 use crate::{
-    command::{CommandDispatcher, CommandId, DispatchDecision, ProcessAdapter, ProcessStart},
+    command::{
+        CommandContext, CommandDispatcher, CommandId, DispatchDecision, ProcessAdapter,
+        ProcessStart, SkipReason,
+    },
+    config::Config,
     listener::{CommandIntent, ListenerSet},
+    session::{DelayInhibitor, SessionEvent},
     wayland::{IdleEvent, IdleWaylandState},
 };
 
@@ -14,6 +22,13 @@ pub(super) struct RuntimeState {
     pub(super) wayland: IdleWaylandState,
     listeners: ListenerSet,
     command_intents: Vec<CommandIntent>,
+    session_command_intents: Vec<SessionCommandIntent>,
+    before_sleep_command: Option<String>,
+    after_resume_command: Option<String>,
+    session_events: Vec<SessionEvent>,
+    session_channel_closed: bool,
+    preparing_for_sleep: bool,
+    delay_inhibitors: HashMap<CommandId, Vec<DelayInhibitor>>,
     dispatcher: CommandDispatcher,
     processes: ProcessAdapter,
     ready_processes: Vec<CommandId>,
@@ -23,11 +38,18 @@ pub(super) struct RuntimeState {
 }
 
 impl RuntimeState {
-    pub(super) fn new(wayland: IdleWaylandState, listeners: ListenerSet) -> Self {
+    pub(super) fn new(wayland: IdleWaylandState, listeners: ListenerSet, config: &Config) -> Self {
         Self {
             wayland,
             listeners,
             command_intents: Vec::new(),
+            session_command_intents: Vec::new(),
+            before_sleep_command: config.general.before_sleep_command.clone(),
+            after_resume_command: config.general.after_resume_command.clone(),
+            session_events: Vec::new(),
+            session_channel_closed: false,
+            preparing_for_sleep: false,
+            delay_inhibitors: HashMap::new(),
             dispatcher: CommandDispatcher::default(),
             processes: ProcessAdapter::default(),
             ready_processes: Vec::new(),
@@ -49,28 +71,16 @@ impl RuntimeState {
         &mut self,
         handle: &LoopHandle<'static, RuntimeState>,
     ) -> Result<(), RuntimeError> {
+        for intent in std::mem::take(&mut self.session_command_intents) {
+            let decision = self
+                .dispatcher
+                .dispatch_command(intent.context, intent.command);
+            self.dispatch_decision(handle, decision, intent.inhibitor)?;
+        }
+
         for intent in std::mem::take(&mut self.command_intents) {
-            match self.dispatcher.dispatch(intent) {
-                DispatchDecision::Skip(decision) => {
-                    self.runtime_events
-                        .push(RuntimeEvent::CommandSkipped(decision));
-                }
-                DispatchDecision::Spawn(request) => match self.processes.spawn(request.clone()) {
-                    Ok(start) => {
-                        register_process_monitor(handle, start)?;
-                        self.runtime_events
-                            .push(RuntimeEvent::CommandStarted(start));
-                    }
-                    Err(error) => {
-                        let command = self
-                            .dispatcher
-                            .finish(request.command_id)
-                            .map_err(RuntimeError::CommandDispatch)?;
-                        self.runtime_events
-                            .push(RuntimeEvent::CommandFailed { command, error });
-                    }
-                },
-            }
+            let decision = self.dispatcher.dispatch(intent);
+            self.dispatch_decision(handle, decision, None)?;
         }
 
         Ok(())
@@ -92,6 +102,7 @@ impl RuntimeState {
             .collect::<HashSet<_>>();
 
         for completion in completions {
+            self.delay_inhibitors.remove(&completion.command_id);
             let command = self
                 .dispatcher
                 .finish(completion.command_id)
@@ -119,6 +130,60 @@ impl RuntimeState {
 
     pub(super) fn take_runtime_events(&mut self) -> Vec<RuntimeEvent> {
         std::mem::take(&mut self.runtime_events)
+    }
+
+    pub(super) fn record_session_event(&mut self, event: SessionEvent) {
+        self.session_events.push(event);
+    }
+
+    pub(super) fn mark_session_channel_closed(&mut self) {
+        self.session_channel_closed = true;
+    }
+
+    pub(super) fn route_session_events(&mut self) -> Result<(), RuntimeError> {
+        for event in std::mem::take(&mut self.session_events) {
+            match event {
+                SessionEvent::PrepareForSleep(inhibitor) => {
+                    if self.preparing_for_sleep {
+                        continue;
+                    }
+                    self.preparing_for_sleep = true;
+                    self.runtime_events.push(RuntimeEvent::PreparingForSleep);
+                    if let Some(command) = self.before_sleep_command.clone() {
+                        self.session_command_intents.push(SessionCommandIntent {
+                            context: CommandContext::BeforeSleep,
+                            command,
+                            inhibitor,
+                        });
+                    }
+                }
+                SessionEvent::Resumed => {
+                    self.preparing_for_sleep = false;
+                    self.runtime_events.push(RuntimeEvent::ResumedFromSleep);
+                    if let Some(command) = self.after_resume_command.clone() {
+                        self.session_command_intents.push(SessionCommandIntent {
+                            context: CommandContext::AfterResume,
+                            command,
+                            inhibitor: None,
+                        });
+                    }
+                }
+                SessionEvent::Failed(error) => return Err(RuntimeError::Session(error)),
+            }
+        }
+
+        if self.session_channel_closed {
+            return Err(RuntimeError::SessionChannelClosed);
+        }
+
+        Ok(())
+    }
+
+    pub(super) fn discard_pending_events(&mut self) {
+        self.wayland.take_events();
+        self.session_events.clear();
+        self.command_intents.clear();
+        self.session_command_intents.clear();
     }
 
     pub(super) fn request_shutdown(&mut self, signal: ShutdownSignal) {
@@ -157,6 +222,60 @@ impl RuntimeState {
     fn mark_process_ready(&mut self, command_id: CommandId) {
         self.ready_processes.push(command_id);
     }
+
+    fn dispatch_decision(
+        &mut self,
+        handle: &LoopHandle<'static, RuntimeState>,
+        decision: DispatchDecision,
+        inhibitor: Option<DelayInhibitor>,
+    ) -> Result<(), RuntimeError> {
+        match decision {
+            DispatchDecision::Skip(decision) => {
+                if let Some(inhibitor) = inhibitor {
+                    let SkipReason::AlreadyRunning(command_id) = decision.reason;
+                    self.delay_inhibitors
+                        .entry(command_id)
+                        .or_default()
+                        .push(inhibitor);
+                }
+                self.runtime_events
+                    .push(RuntimeEvent::CommandSkipped(decision));
+            }
+            DispatchDecision::Spawn(request) => {
+                if let Some(inhibitor) = inhibitor {
+                    self.delay_inhibitors
+                        .entry(request.command_id)
+                        .or_default()
+                        .push(inhibitor);
+                }
+
+                match self.processes.spawn(request.clone()) {
+                    Ok(start) => {
+                        register_process_monitor(handle, start)?;
+                        self.runtime_events
+                            .push(RuntimeEvent::CommandStarted(start));
+                    }
+                    Err(error) => {
+                        self.delay_inhibitors.remove(&request.command_id);
+                        let command = self
+                            .dispatcher
+                            .finish(request.command_id)
+                            .map_err(RuntimeError::CommandDispatch)?;
+                        self.runtime_events
+                            .push(RuntimeEvent::CommandFailed { command, error });
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+struct SessionCommandIntent {
+    context: CommandContext,
+    command: String,
+    inhibitor: Option<DelayInhibitor>,
 }
 
 fn register_process_monitor(
@@ -194,15 +313,17 @@ fn register_process_monitor(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{fs::File, os::fd::OwnedFd, time::Duration};
 
     use calloop::EventLoop;
 
-    use super::RuntimeState;
+    use super::{RuntimeState, SessionCommandIntent};
     use crate::{
+        command::CommandContext,
         config::{Config, GeneralConfig, ListenerConfig},
         listener::{CommandIntent, CommandKind, ListenerError, ListenerId, ListenerSet},
         runtime::{RuntimeError, RuntimeEvent, ShutdownSignal},
+        session::{DelayInhibitor, SessionEvent},
         wayland::{IdleEvent, IdleWaylandState},
     };
 
@@ -278,6 +399,82 @@ mod tests {
             state.take_runtime_events().as_slice(),
             [RuntimeEvent::ShutdownRequested(ShutdownSignal::Interrupt)]
         ));
+    }
+
+    #[test]
+    fn routes_prepare_for_sleep_to_the_configured_command() {
+        let mut state = runtime_state();
+        state.before_sleep_command = Some("lock before sleep".to_string());
+        state.record_session_event(SessionEvent::PrepareForSleep(None));
+
+        assert_runtime_ok(state.route_session_events());
+
+        assert!(matches!(
+            state.take_runtime_events().as_slice(),
+            [RuntimeEvent::PreparingForSleep]
+        ));
+        assert!(matches!(
+            state.session_command_intents.as_slice(),
+            [SessionCommandIntent {
+                context: CommandContext::BeforeSleep,
+                command,
+                inhibitor: None,
+            }] if command == "lock before sleep"
+        ));
+    }
+
+    #[test]
+    fn ignores_duplicate_prepare_for_sleep_events() {
+        let mut state = runtime_state();
+        state.before_sleep_command = Some("lock before sleep".to_string());
+        state.record_session_event(SessionEvent::PrepareForSleep(None));
+        state.record_session_event(SessionEvent::PrepareForSleep(None));
+
+        assert_runtime_ok(state.route_session_events());
+
+        assert_eq!(state.session_command_intents.len(), 1);
+        assert!(matches!(
+            state.take_runtime_events().as_slice(),
+            [RuntimeEvent::PreparingForSleep]
+        ));
+    }
+
+    #[test]
+    fn routes_resume_to_the_configured_command() {
+        let mut state = runtime_state();
+        state.after_resume_command = Some("outputs on".to_string());
+        state.record_session_event(SessionEvent::Resumed);
+
+        assert_runtime_ok(state.route_session_events());
+
+        assert!(matches!(
+            state.take_runtime_events().as_slice(),
+            [RuntimeEvent::ResumedFromSleep]
+        ));
+        assert!(matches!(
+            state.session_command_intents.as_slice(),
+            [SessionCommandIntent {
+                context: CommandContext::AfterResume,
+                command,
+                inhibitor: None,
+            }] if command == "outputs on"
+        ));
+    }
+
+    #[test]
+    fn holds_the_sleep_inhibitor_until_the_command_finishes() {
+        let mut event_loop = new_event_loop();
+        let mut state = runtime_state();
+        state.before_sleep_command = Some("exit 0".to_string());
+        state.record_session_event(SessionEvent::PrepareForSleep(Some(test_inhibitor())));
+
+        assert_runtime_ok(state.route_session_events());
+        assert_runtime_ok(state.dispatch_command_intents(&event_loop.handle()));
+        assert_eq!(state.delay_inhibitors.len(), 1);
+        state.take_runtime_events();
+
+        let _ = wait_for_process_events(&mut event_loop, &mut state);
+        assert!(state.delay_inhibitors.is_empty());
     }
 
     #[test]
@@ -370,6 +567,7 @@ mod tests {
         RuntimeState::new(
             IdleWaylandState::default(),
             ListenerSet::from_config(&config),
+            &config,
         )
     }
 
@@ -385,5 +583,14 @@ mod tests {
         if let Err(error) = result {
             panic!("{error}");
         }
+    }
+
+    fn test_inhibitor() -> DelayInhibitor {
+        let file = match File::open("/dev/null") {
+            Ok(file) => file,
+            Err(error) => panic!("failed to open test file: {error}"),
+        };
+        let fd: OwnedFd = file.into();
+        DelayInhibitor::new(fd.into())
     }
 }

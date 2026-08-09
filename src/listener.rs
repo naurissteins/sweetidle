@@ -28,7 +28,7 @@ pub struct CommandIntent {
     pub command: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CommandKind {
     Timeout,
     Resume,

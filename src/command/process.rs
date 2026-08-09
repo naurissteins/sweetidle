@@ -4,7 +4,7 @@ use std::{
     process::{Child, Command, ExitStatus, Stdio},
 };
 
-use super::{CommandId, SpawnRequest};
+use super::{CommandContext, CommandId, SpawnRequest};
 
 #[derive(Debug, Default)]
 pub struct ProcessAdapter {
@@ -14,6 +14,7 @@ pub struct ProcessAdapter {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessStart {
     pub command_id: CommandId,
+    pub context: CommandContext,
     pub process_id: u32,
 }
 
@@ -66,6 +67,7 @@ impl ProcessAdapter {
 
         Ok(ProcessStart {
             command_id: request.command_id,
+            context: request.context,
             process_id,
         })
     }
@@ -159,7 +161,7 @@ struct RunningProcess {
 mod tests {
     use std::{thread, time::Duration};
 
-    use super::{CommandId, ProcessAdapter, SpawnRequest};
+    use super::{CommandContext, CommandId, ProcessAdapter, SpawnRequest};
     use crate::listener::{CommandKind, ListenerId};
 
     #[test]
@@ -219,8 +221,10 @@ mod tests {
     fn request(command_index: usize, command: &str) -> SpawnRequest {
         SpawnRequest {
             command_id: CommandId(command_index),
-            listener_id: ListenerId::from_index(0),
-            kind: CommandKind::Timeout,
+            context: CommandContext::Listener {
+                listener_id: ListenerId::from_index(0),
+                kind: CommandKind::Timeout,
+            },
             command: command.to_string(),
         }
     }

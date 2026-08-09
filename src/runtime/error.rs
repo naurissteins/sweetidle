@@ -3,6 +3,7 @@ use std::{error::Error, fmt, io};
 use crate::{
     command::{CommandDispatchError, CommandId, ProcessError},
     listener::{ListenerError, ListenerId},
+    session::SessionError,
     wayland::IdleWaylandError,
 };
 
@@ -11,6 +12,9 @@ pub enum RuntimeError {
     Wayland(IdleWaylandError),
     CreateEventLoop(calloop::Error),
     RegisterWayland(calloop::Error),
+    Session(SessionError),
+    RegisterSession(calloop::Error),
+    SessionChannelClosed,
     CreateSignalPipe {
         signal: &'static str,
         source: io::Error,
@@ -55,6 +59,14 @@ impl fmt::Display for RuntimeError {
                     "failed to register Wayland event source: {source}"
                 )
             }
+            Self::Session(source) => write!(formatter, "logind integration failed: {source}"),
+            Self::RegisterSession(source) => {
+                write!(
+                    formatter,
+                    "failed to register logind event source: {source}"
+                )
+            }
+            Self::SessionChannelClosed => write!(formatter, "logind event channel closed"),
             Self::CreateSignalPipe { signal, source } => {
                 write!(formatter, "failed to create {signal} signal pipe: {source}")
             }
@@ -110,6 +122,7 @@ impl Error for RuntimeError {
             Self::Wayland(source) => Some(source),
             Self::CreateEventLoop(source)
             | Self::RegisterWayland(source)
+            | Self::RegisterSession(source)
             | Self::Dispatch(source)
             | Self::RegisterProcessMonitor { source, .. } => Some(source),
             Self::CreateSignalPipe { source, .. } | Self::RegisterSignalHandler { source, .. } => {
@@ -117,9 +130,13 @@ impl Error for RuntimeError {
             }
             Self::RegisterSignalSource { source, .. } => Some(source),
             Self::Process(source) => Some(source),
+            Self::Session(source) => Some(source),
             Self::CommandDispatch(source) => Some(source),
             Self::MonitorProcess { source, .. } => Some(source),
-            Self::Listener(_) | Self::InvalidProcessId(_) | Self::ProcessNotReady(_) => None,
+            Self::Listener(_)
+            | Self::SessionChannelClosed
+            | Self::InvalidProcessId(_)
+            | Self::ProcessNotReady(_) => None,
         }
     }
 }
@@ -127,6 +144,12 @@ impl Error for RuntimeError {
 impl From<IdleWaylandError> for RuntimeError {
     fn from(source: IdleWaylandError) -> Self {
         Self::Wayland(source)
+    }
+}
+
+impl From<SessionError> for RuntimeError {
+    fn from(source: SessionError) -> Self {
+        Self::Session(source)
     }
 }
 
