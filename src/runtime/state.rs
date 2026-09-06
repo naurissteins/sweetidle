@@ -14,7 +14,7 @@ use crate::{
     },
     config::Config,
     listener::{CommandIntent, ListenerSet},
-    session::{DelayInhibitor, SessionEvent},
+    session::{DbusInhibitEvent, DelayInhibitor, SessionEvent},
     wayland::{IdleEvent, IdleWaylandState},
 };
 
@@ -29,6 +29,9 @@ pub(super) struct RuntimeState {
     after_resume_command: Option<String>,
     session_events: Vec<SessionEvent>,
     session_channel_closed: bool,
+    dbus_inhibit_events: Vec<DbusInhibitEvent>,
+    dbus_inhibit_channel_closed: bool,
+    active_dbus_inhibitors: usize,
     preparing_for_sleep: bool,
     delay_inhibitors: HashMap<CommandId, Vec<DelayInhibitor>>,
     dispatcher: CommandDispatcher,
@@ -52,6 +55,9 @@ impl RuntimeState {
             after_resume_command: config.general.after_resume_command.clone(),
             session_events: Vec::new(),
             session_channel_closed: false,
+            dbus_inhibit_events: Vec::new(),
+            dbus_inhibit_channel_closed: false,
+            active_dbus_inhibitors: 0,
             preparing_for_sleep: false,
             delay_inhibitors: HashMap::new(),
             dispatcher: CommandDispatcher::default(),
@@ -144,6 +150,68 @@ impl RuntimeState {
         self.session_channel_closed = true;
     }
 
+    pub(super) fn record_dbus_inhibit_event(&mut self, event: DbusInhibitEvent) {
+        self.dbus_inhibit_events.push(event);
+    }
+
+    pub(super) fn mark_dbus_inhibit_channel_closed(&mut self) {
+        self.dbus_inhibit_channel_closed = true;
+    }
+
+    pub(super) fn route_dbus_inhibit_events(&mut self) -> Result<(), RuntimeError> {
+        for event in std::mem::take(&mut self.dbus_inhibit_events) {
+            match event {
+                DbusInhibitEvent::Added {
+                    inhibitor,
+                    active_count,
+                } => {
+                    self.update_dbus_inhibit_count(active_count)?;
+                    self.runtime_events.push(RuntimeEvent::DbusInhibitorAdded {
+                        cookie: inhibitor.cookie,
+                        application: inhibitor.application,
+                        reason: inhibitor.reason,
+                        active_count,
+                    });
+                }
+                DbusInhibitEvent::Removed {
+                    inhibitor,
+                    active_count,
+                } => {
+                    self.update_dbus_inhibit_count(active_count)?;
+                    self.runtime_events
+                        .push(RuntimeEvent::DbusInhibitorRemoved {
+                            cookie: inhibitor.cookie,
+                            application: inhibitor.application,
+                            reason: inhibitor.reason,
+                            active_count,
+                        });
+                }
+                DbusInhibitEvent::OwnerDisconnected {
+                    owner,
+                    released_count,
+                    active_count,
+                } => {
+                    self.update_dbus_inhibit_count(active_count)?;
+                    self.runtime_events
+                        .push(RuntimeEvent::DbusInhibitorOwnerDisconnected {
+                            owner,
+                            released_count,
+                            active_count,
+                        });
+                }
+                DbusInhibitEvent::Failed(error) => {
+                    return Err(RuntimeError::DbusInhibit(error));
+                }
+            }
+        }
+
+        if self.dbus_inhibit_channel_closed {
+            return Err(RuntimeError::DbusInhibitChannelClosed);
+        }
+
+        Ok(())
+    }
+
     pub(super) fn route_session_events(&mut self) -> Result<(), RuntimeError> {
         for event in std::mem::take(&mut self.session_events) {
             match event {
@@ -206,6 +274,7 @@ impl RuntimeState {
     pub(super) fn discard_pending_events(&mut self) {
         self.wayland.take_events();
         self.session_events.clear();
+        self.dbus_inhibit_events.clear();
         self.command_intents.clear();
         self.session_command_intents.clear();
     }
@@ -227,6 +296,13 @@ impl RuntimeState {
     fn route_idle_event(&mut self, event: IdleEvent) -> Result<(), RuntimeError> {
         match event {
             IdleEvent::Idled(listener_id) => {
+                if self.active_dbus_inhibitors > 0 {
+                    self.runtime_events.push(RuntimeEvent::IdleSuppressed {
+                        listener_id,
+                        active_dbus_inhibitors: self.active_dbus_inhibitors,
+                    });
+                    return Ok(());
+                }
                 if let Some(intent) = self
                     .listeners
                     .mark_timed_out(listener_id)
@@ -245,6 +321,24 @@ impl RuntimeState {
 
     fn mark_process_ready(&mut self, command_id: CommandId) {
         self.ready_processes.push(command_id);
+    }
+
+    fn update_dbus_inhibit_count(&mut self, active_count: usize) -> Result<(), RuntimeError> {
+        let was_inhibited = self.active_dbus_inhibitors > 0;
+        let is_inhibited = active_count > 0;
+        self.active_dbus_inhibitors = active_count;
+
+        if was_inhibited == is_inhibited {
+            return Ok(());
+        }
+
+        let requests = self.listeners.timeout_requests();
+        self.wayland.reset_notifications(&requests)?;
+        if is_inhibited {
+            self.command_intents.extend(self.listeners.mark_active());
+        }
+
+        Ok(())
     }
 
     fn dispatch_decision(
@@ -347,7 +441,7 @@ mod tests {
         config::{Config, GeneralConfig, ListenerConfig},
         listener::{CommandIntent, CommandKind, ListenerError, ListenerId, ListenerSet},
         runtime::{RuntimeError, RuntimeEvent, ShutdownSignal},
-        session::{DelayInhibitor, SessionEvent},
+        session::{DbusInhibitEvent, DelayInhibitor, InhibitorInfo, SessionEvent},
         wayland::{IdleEvent, IdleWaylandState},
     };
 
@@ -409,6 +503,80 @@ mod tests {
                 listener_id
             ))) if listener_id == ListenerId::from_index(9)
         ));
+    }
+
+    #[test]
+    fn suppresses_timeout_commands_while_dbus_inhibited() {
+        let mut state = runtime_state();
+        state.record_dbus_inhibit_event(DbusInhibitEvent::Added {
+            inhibitor: inhibitor_info(1),
+            active_count: 1,
+        });
+        assert_runtime_ok(state.route_dbus_inhibit_events());
+        state.take_runtime_events();
+
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(0))));
+
+        assert!(state.command_intents.is_empty());
+        assert!(matches!(
+            state.take_runtime_events().as_slice(),
+            [RuntimeEvent::IdleSuppressed {
+                listener_id,
+                active_dbus_inhibitors: 1,
+            }] if *listener_id == ListenerId::from_index(0)
+        ));
+    }
+
+    #[test]
+    fn starting_inhibition_resumes_listeners_that_already_fired() {
+        let mut state = runtime_state();
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(1))));
+        state.command_intents.clear();
+        state.record_dbus_inhibit_event(DbusInhibitEvent::Added {
+            inhibitor: inhibitor_info(1),
+            active_count: 1,
+        });
+
+        assert_runtime_ok(state.route_dbus_inhibit_events());
+
+        assert_eq!(
+            state.command_intents,
+            vec![intent(1, CommandKind::Resume, "outputs on")]
+        );
+    }
+
+    #[test]
+    fn final_inhibitor_release_allows_fresh_timeouts() {
+        let mut state = runtime_state();
+        state.record_dbus_inhibit_event(DbusInhibitEvent::Added {
+            inhibitor: inhibitor_info(1),
+            active_count: 1,
+        });
+        state.record_dbus_inhibit_event(DbusInhibitEvent::Added {
+            inhibitor: inhibitor_info(2),
+            active_count: 2,
+        });
+        state.record_dbus_inhibit_event(DbusInhibitEvent::Removed {
+            inhibitor: inhibitor_info(1),
+            active_count: 1,
+        });
+        assert_runtime_ok(state.route_dbus_inhibit_events());
+
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(0))));
+        assert!(state.command_intents.is_empty());
+
+        state.record_dbus_inhibit_event(DbusInhibitEvent::OwnerDisconnected {
+            owner: ":1.2".to_string(),
+            released_count: 1,
+            active_count: 0,
+        });
+        assert_runtime_ok(state.route_dbus_inhibit_events());
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(0))));
+
+        assert_eq!(
+            state.command_intents,
+            vec![intent(0, CommandKind::Timeout, "lock")]
+        );
     }
 
     #[test]
@@ -658,6 +826,15 @@ mod tests {
             listener_id: ListenerId::from_index(listener_index),
             kind,
             command: command.to_string(),
+        }
+    }
+
+    fn inhibitor_info(cookie: u32) -> InhibitorInfo {
+        InhibitorInfo {
+            cookie,
+            owner: format!(":1.{cookie}"),
+            application: "test application".to_string(),
+            reason: "test reason".to_string(),
         }
     }
 

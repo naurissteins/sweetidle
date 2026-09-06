@@ -144,6 +144,51 @@ fn log_runtime_event(event: RuntimeEvent) -> bool {
             info!("session unlock requested");
             false
         }
+        RuntimeEvent::DbusInhibitorAdded {
+            cookie,
+            application,
+            reason,
+            active_count,
+        } => {
+            debug!(
+                cookie,
+                application, reason, active_count, "D-Bus idle inhibitor added"
+            );
+            false
+        }
+        RuntimeEvent::DbusInhibitorRemoved {
+            cookie,
+            application,
+            reason,
+            active_count,
+        } => {
+            debug!(
+                cookie,
+                application, reason, active_count, "D-Bus idle inhibitor removed"
+            );
+            false
+        }
+        RuntimeEvent::DbusInhibitorOwnerDisconnected {
+            owner,
+            released_count,
+            active_count,
+        } => {
+            debug!(
+                owner,
+                released_count, active_count, "released inhibitors for disconnected D-Bus client"
+            );
+            false
+        }
+        RuntimeEvent::IdleSuppressed {
+            listener_id,
+            active_dbus_inhibitors,
+        } => {
+            debug!(
+                listener = listener_id.index(),
+                active_dbus_inhibitors, "idle action suppressed"
+            );
+            false
+        }
         RuntimeEvent::CommandStarted(start) => {
             info!(
                 command_id = start.command_id.index(),

@@ -33,14 +33,14 @@ impl IdleWaylandConnection {
         let queue_handle = event_queue.handle();
         let notifier = bind_idle_notifier(&globals, &queue_handle)?;
         let seat = bind_first_seat(&globals, &queue_handle)?;
-        let notifications = create_notifications(&notifier, &seat, &queue_handle, requests)?;
+        let notifications = create_notifications(&notifier, &seat, &queue_handle, requests, 0)?;
 
         connection.flush().map_err(IdleWaylandError::Flush)?;
 
         Ok(Self {
             connection,
             event_queue,
-            state: IdleWaylandState::new(notifier, seat, notifications),
+            state: IdleWaylandState::new(notifier, seat, queue_handle, notifications),
         })
     }
 
@@ -133,22 +133,27 @@ impl Error for IdleWaylandError {
 #[derive(Debug, Default)]
 pub(crate) struct IdleWaylandState {
     events: Vec<IdleEvent>,
-    _notifier: Option<ExtIdleNotifierV1>,
-    _seat: Option<wl_seat::WlSeat>,
-    _notifications: Vec<ExtIdleNotificationV1>,
+    notification_generation: u64,
+    notifier: Option<ExtIdleNotifierV1>,
+    seat: Option<wl_seat::WlSeat>,
+    queue_handle: Option<QueueHandle<Self>>,
+    notifications: Vec<ExtIdleNotificationV1>,
 }
 
 impl IdleWaylandState {
     fn new(
         notifier: ExtIdleNotifierV1,
         seat: wl_seat::WlSeat,
+        queue_handle: QueueHandle<Self>,
         notifications: Vec<ExtIdleNotificationV1>,
     ) -> Self {
         Self {
             events: Vec::new(),
-            _notifier: Some(notifier),
-            _seat: Some(seat),
-            _notifications: notifications,
+            notification_generation: 0,
+            notifier: Some(notifier),
+            seat: Some(seat),
+            queue_handle: Some(queue_handle),
+            notifications,
         }
     }
 
@@ -158,6 +163,38 @@ impl IdleWaylandState {
 
     pub(crate) fn take_events(&mut self) -> Vec<IdleEvent> {
         std::mem::take(&mut self.events)
+    }
+
+    fn accepts_generation(&self, generation: u64) -> bool {
+        generation == self.notification_generation
+    }
+
+    pub(crate) fn reset_notifications(
+        &mut self,
+        requests: &[TimeoutRequest],
+    ) -> Result<(), IdleWaylandError> {
+        self.notification_generation = self.notification_generation.wrapping_add(1);
+        self.events.clear();
+        for notification in self.notifications.drain(..) {
+            notification.destroy();
+        }
+
+        let (Some(notifier), Some(seat), Some(queue_handle)) = (
+            self.notifier.as_ref(),
+            self.seat.as_ref(),
+            self.queue_handle.as_ref(),
+        ) else {
+            return Ok(());
+        };
+        self.notifications = create_notifications(
+            notifier,
+            seat,
+            queue_handle,
+            requests,
+            self.notification_generation,
+        )?;
+
+        Ok(())
     }
 }
 
@@ -205,12 +242,21 @@ fn create_notifications(
     seat: &wl_seat::WlSeat,
     queue_handle: &QueueHandle<IdleWaylandState>,
     requests: &[TimeoutRequest],
+    generation: u64,
 ) -> Result<Vec<ExtIdleNotificationV1>, IdleWaylandError> {
     requests
         .iter()
         .map(|request| {
             let timeout = timeout_millis(request)?;
-            Ok(notifier.get_idle_notification(timeout, seat, queue_handle, request.listener_id))
+            Ok(notifier.get_idle_notification(
+                timeout,
+                seat,
+                queue_handle,
+                IdleNotificationData {
+                    listener_id: request.listener_id,
+                    generation,
+                },
+            ))
         })
         .collect()
 }
@@ -246,21 +292,31 @@ impl Dispatch<ExtIdleNotifierV1, ()> for IdleWaylandState {
     }
 }
 
-impl Dispatch<ExtIdleNotificationV1, ListenerId> for IdleWaylandState {
+#[derive(Debug, Clone, Copy)]
+struct IdleNotificationData {
+    listener_id: ListenerId,
+    generation: u64,
+}
+
+impl Dispatch<ExtIdleNotificationV1, IdleNotificationData> for IdleWaylandState {
     fn event(
         state: &mut Self,
         _proxy: &ExtIdleNotificationV1,
         event: ext_idle_notification_v1::Event,
-        listener_id: &ListenerId,
+        data: &IdleNotificationData,
         _connection: &Connection,
         _queue_handle: &QueueHandle<Self>,
     ) {
+        if !state.accepts_generation(data.generation) {
+            return;
+        }
+
         match event {
             ext_idle_notification_v1::Event::Idled => {
-                state.record(IdleEvent::Idled(*listener_id));
+                state.record(IdleEvent::Idled(data.listener_id));
             }
             ext_idle_notification_v1::Event::Resumed => {
-                state.record(IdleEvent::Resumed(*listener_id));
+                state.record(IdleEvent::Resumed(data.listener_id));
             }
             _ => {}
         }
@@ -312,6 +368,17 @@ mod tests {
             ]
         );
         assert!(state.take_events().is_empty());
+    }
+
+    #[test]
+    fn rejects_callbacks_from_replaced_notification_generations() {
+        let state = IdleWaylandState {
+            notification_generation: 3,
+            ..IdleWaylandState::default()
+        };
+
+        assert!(!state.accepts_generation(2));
+        assert!(state.accepts_generation(3));
     }
 
     fn request(listener_index: usize, timeout_seconds: u64) -> TimeoutRequest {

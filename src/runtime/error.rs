@@ -3,7 +3,7 @@ use std::{error::Error, fmt, io};
 use crate::{
     command::{CommandDispatchError, CommandId, ProcessError},
     listener::{ListenerError, ListenerId},
-    session::SessionError,
+    session::{DbusInhibitError, SessionError},
     wayland::IdleWaylandError,
 };
 
@@ -15,6 +15,9 @@ pub enum RuntimeError {
     Session(SessionError),
     RegisterSession(calloop::Error),
     SessionChannelClosed,
+    DbusInhibit(DbusInhibitError),
+    RegisterDbusInhibit(calloop::Error),
+    DbusInhibitChannelClosed,
     CreateSignalPipe {
         signal: &'static str,
         source: io::Error,
@@ -67,6 +70,18 @@ impl fmt::Display for RuntimeError {
                 )
             }
             Self::SessionChannelClosed => write!(formatter, "logind event channel closed"),
+            Self::DbusInhibit(source) => {
+                write!(formatter, "D-Bus idle inhibition failed: {source}")
+            }
+            Self::RegisterDbusInhibit(source) => {
+                write!(
+                    formatter,
+                    "failed to register D-Bus inhibitor event source: {source}"
+                )
+            }
+            Self::DbusInhibitChannelClosed => {
+                write!(formatter, "D-Bus inhibitor event channel closed")
+            }
             Self::CreateSignalPipe { signal, source } => {
                 write!(formatter, "failed to create {signal} signal pipe: {source}")
             }
@@ -123,6 +138,7 @@ impl Error for RuntimeError {
             Self::CreateEventLoop(source)
             | Self::RegisterWayland(source)
             | Self::RegisterSession(source)
+            | Self::RegisterDbusInhibit(source)
             | Self::Dispatch(source)
             | Self::RegisterProcessMonitor { source, .. } => Some(source),
             Self::CreateSignalPipe { source, .. } | Self::RegisterSignalHandler { source, .. } => {
@@ -131,10 +147,12 @@ impl Error for RuntimeError {
             Self::RegisterSignalSource { source, .. } => Some(source),
             Self::Process(source) => Some(source),
             Self::Session(source) => Some(source),
+            Self::DbusInhibit(source) => Some(source),
             Self::CommandDispatch(source) => Some(source),
             Self::MonitorProcess { source, .. } => Some(source),
             Self::Listener(_)
             | Self::SessionChannelClosed
+            | Self::DbusInhibitChannelClosed
             | Self::InvalidProcessId(_)
             | Self::ProcessNotReady(_) => None,
         }
@@ -150,6 +168,12 @@ impl From<IdleWaylandError> for RuntimeError {
 impl From<SessionError> for RuntimeError {
     fn from(source: SessionError) -> Self {
         Self::Session(source)
+    }
+}
+
+impl From<DbusInhibitError> for RuntimeError {
+    fn from(source: DbusInhibitError) -> Self {
+        Self::DbusInhibit(source)
     }
 }
 
