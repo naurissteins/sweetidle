@@ -15,7 +15,7 @@ use crate::{
     command::{FinishedCommand, ProcessCompletion, ProcessError, ProcessStart, SkipDecision},
     config::Config,
     listener::ListenerSet,
-    session::{LogindFeatures, LogindMonitor},
+    session::{DbusInhibitMonitor, LogindFeatures, LogindMonitor},
     wayland::IdleWaylandConnection,
 };
 
@@ -26,6 +26,27 @@ pub enum RuntimeEvent {
     ResumedFromSleep,
     LockRequested,
     UnlockRequested,
+    DbusInhibitorAdded {
+        cookie: u32,
+        application: String,
+        reason: String,
+        active_count: usize,
+    },
+    DbusInhibitorRemoved {
+        cookie: u32,
+        application: String,
+        reason: String,
+        active_count: usize,
+    },
+    DbusInhibitorOwnerDisconnected {
+        owner: String,
+        released_count: usize,
+        active_count: usize,
+    },
+    IdleSuppressed {
+        listener_id: crate::listener::ListenerId,
+        active_dbus_inhibitors: usize,
+    },
     CommandStarted(ProcessStart),
     CommandSkipped(SkipDecision),
     CommandFinished {
@@ -42,6 +63,7 @@ pub struct IdleRuntime {
     event_loop: EventLoop<'static, RuntimeState>,
     state: RuntimeState,
     _logind: Option<LogindMonitor>,
+    _dbus_inhibit: Option<DbusInhibitMonitor>,
 }
 
 impl IdleRuntime {
@@ -60,11 +82,13 @@ impl IdleRuntime {
             .map_err(|error| RuntimeError::RegisterWayland(error.error))?;
         register_sources(&event_loop.handle())?;
         let logind = register_logind(config, &event_loop)?;
+        let dbus_inhibit = register_dbus_inhibit(config, &event_loop)?;
 
         Ok(Self {
             event_loop,
             state: RuntimeState::new(parts.state, listeners, config),
             _logind: logind,
+            _dbus_inhibit: dbus_inhibit,
         })
     }
 
@@ -82,6 +106,7 @@ impl IdleRuntime {
             return Ok(self.state.take_runtime_events());
         }
 
+        self.state.route_dbus_inhibit_events()?;
         self.state.route_session_events()?;
         self.state.route_wayland_events()?;
         self.state
@@ -89,6 +114,30 @@ impl IdleRuntime {
 
         Ok(self.state.take_runtime_events())
     }
+}
+
+fn register_dbus_inhibit(
+    config: &Config,
+    event_loop: &EventLoop<'static, RuntimeState>,
+) -> Result<Option<DbusInhibitMonitor>, RuntimeError> {
+    if !dbus_inhibit_enabled(config) {
+        return Ok(None);
+    }
+
+    let (monitor, source) = DbusInhibitMonitor::connect()?;
+    event_loop
+        .handle()
+        .insert_source(source, |event, _, state: &mut RuntimeState| match event {
+            ChannelEvent::Msg(event) => state.record_dbus_inhibit_event(event),
+            ChannelEvent::Closed => state.mark_dbus_inhibit_channel_closed(),
+        })
+        .map_err(|error| RuntimeError::RegisterDbusInhibit(error.error))?;
+
+    Ok(Some(monitor))
+}
+
+fn dbus_inhibit_enabled(config: &Config) -> bool {
+    !config.general.ignore_dbus_inhibit
 }
 
 fn register_logind(
@@ -127,7 +176,7 @@ fn logind_features(config: &Config) -> Option<LogindFeatures> {
 
 #[cfg(test)]
 mod tests {
-    use super::logind_features;
+    use super::{dbus_inhibit_enabled, logind_features};
     use crate::config::Config;
     use crate::session::LogindFeatures;
 
@@ -180,5 +229,18 @@ mod tests {
     #[test]
     fn skips_logind_when_no_session_hooks_are_configured() {
         assert_eq!(logind_features(&Config::default()), None);
+    }
+
+    #[test]
+    fn enables_dbus_inhibitors_by_default() {
+        assert!(dbus_inhibit_enabled(&Config::default()));
+    }
+
+    #[test]
+    fn honors_the_ignore_dbus_inhibit_option() {
+        let mut config = Config::default();
+        config.general.ignore_dbus_inhibit = true;
+
+        assert!(!dbus_inhibit_enabled(&config));
     }
 }
