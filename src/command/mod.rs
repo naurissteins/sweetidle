@@ -31,6 +31,7 @@ pub enum CommandContext {
         kind: CommandKind,
     },
     Lock,
+    Unlock,
     BeforeSleep,
     AfterResume,
 }
@@ -237,6 +238,10 @@ mod tests {
             DispatchDecision::Spawn(_)
         ));
         assert!(matches!(
+            dispatcher.dispatch_command(CommandContext::Unlock, "unlock".to_string()),
+            DispatchDecision::Spawn(_)
+        ));
+        assert!(matches!(
             dispatcher.dispatch_command(CommandContext::BeforeSleep, "prepare".to_string()),
             DispatchDecision::Spawn(_)
         ));
@@ -244,7 +249,7 @@ mod tests {
             dispatcher.dispatch_command(CommandContext::AfterResume, "outputs on".to_string()),
             DispatchDecision::Spawn(_)
         ));
-        assert_eq!(dispatcher.running_count(), 3);
+        assert_eq!(dispatcher.running_count(), 4);
     }
 
     #[test]

@@ -114,7 +114,8 @@ fn register_logind(
 fn logind_features(config: &Config) -> Option<LogindFeatures> {
     let has_before_sleep = config.general.before_sleep_command.is_some();
     let has_after_resume = config.general.after_resume_command.is_some();
-    let session_events = config.general.lock_command.is_some();
+    let session_events =
+        config.general.lock_command.is_some() || config.general.unlock_command.is_some();
     let sleep_events = has_before_sleep || has_after_resume;
 
     (sleep_events || session_events).then_some(LogindFeatures {
@@ -150,6 +151,21 @@ mod tests {
     fn starts_logind_for_a_lock_command_without_sleep_monitoring() {
         let mut config = Config::default();
         config.general.lock_command = Some("lock".to_string());
+
+        assert_eq!(
+            logind_features(&config),
+            Some(LogindFeatures {
+                sleep_events: false,
+                delay_inhibitor: false,
+                session_events: true,
+            })
+        );
+    }
+
+    #[test]
+    fn starts_logind_for_an_unlock_command_without_sleep_monitoring() {
+        let mut config = Config::default();
+        config.general.unlock_command = Some("unlock".to_string());
 
         assert_eq!(
             logind_features(&config),

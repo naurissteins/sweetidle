@@ -7,6 +7,7 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneralConfig {
     pub lock_command: Option<String>,
+    pub unlock_command: Option<String>,
     pub before_sleep_command: Option<String>,
     pub after_resume_command: Option<String>,
     pub wait_before_sleep: bool,
@@ -18,6 +19,7 @@ impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
             lock_command: None,
+            unlock_command: None,
             before_sleep_command: None,
             after_resume_command: None,
             wait_before_sleep: true,
