@@ -95,6 +95,10 @@ fn parse_general(node: &KdlNode) -> Result<GeneralConfig, ConfigError> {
                 seen.insert("general", field)?;
                 config.lock_command = Some(required_command(field, child)?);
             }
+            "unlock-command" => {
+                seen.insert("general", field)?;
+                config.unlock_command = Some(required_command(field, child)?);
+            }
             "before-sleep-command" => {
                 seen.insert("general", field)?;
                 config.before_sleep_command = Some(required_command(field, child)?);
@@ -281,6 +285,7 @@ mod tests {
         let source = r#"
 general {
   lock-command "sweetslock"
+  unlock-command "sweetslockctl unlock"
   before-sleep-command "sweetslock --daemonize"
   after-resume-command "sweetsmsg output '*' power on"
   wait-before-sleep #true
@@ -304,6 +309,10 @@ listener timeout=600 {
         };
 
         assert_eq!(config.general.lock_command.as_deref(), Some("sweetslock"));
+        assert_eq!(
+            config.general.unlock_command.as_deref(),
+            Some("sweetslockctl unlock")
+        );
         assert!(config.general.wait_before_sleep);
         assert!(config.general.ignore_systemd_inhibit);
         assert_eq!(config.listeners.len(), 2);
@@ -367,6 +376,22 @@ listener timeout=600 {
             error,
             ConfigError::InvalidValue {
                 field: "on-timeout".to_string(),
+                reason: "command must not be empty".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_empty_unlock_command() {
+        let error = match Config::parse("general { unlock-command \"  \" }\n") {
+            Ok(config) => panic!("unexpected config: {config:?}"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            ConfigError::InvalidValue {
+                field: "unlock-command".to_string(),
                 reason: "command must not be empty".to_string()
             }
         );

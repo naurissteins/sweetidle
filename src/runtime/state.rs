@@ -24,6 +24,7 @@ pub(super) struct RuntimeState {
     command_intents: Vec<CommandIntent>,
     session_command_intents: Vec<SessionCommandIntent>,
     lock_command: Option<String>,
+    unlock_command: Option<String>,
     before_sleep_command: Option<String>,
     after_resume_command: Option<String>,
     session_events: Vec<SessionEvent>,
@@ -46,6 +47,7 @@ impl RuntimeState {
             command_intents: Vec::new(),
             session_command_intents: Vec::new(),
             lock_command: config.general.lock_command.clone(),
+            unlock_command: config.general.unlock_command.clone(),
             before_sleep_command: config.general.before_sleep_command.clone(),
             after_resume_command: config.general.after_resume_command.clone(),
             session_events: Vec::new(),
@@ -182,6 +184,13 @@ impl RuntimeState {
                 }
                 SessionEvent::UnlockRequested => {
                     self.runtime_events.push(RuntimeEvent::UnlockRequested);
+                    if let Some(command) = self.unlock_command.clone() {
+                        self.session_command_intents.push(SessionCommandIntent {
+                            context: CommandContext::Unlock,
+                            command,
+                            inhibitor: None,
+                        });
+                    }
                 }
                 SessionEvent::Failed(error) => return Err(RuntimeError::Session(error)),
             }
@@ -499,7 +508,29 @@ mod tests {
     }
 
     #[test]
-    fn records_unlock_without_queuing_a_command() {
+    fn routes_unlock_request_to_the_configured_command() {
+        let mut state = runtime_state();
+        state.unlock_command = Some("unlock session".to_string());
+        state.record_session_event(SessionEvent::UnlockRequested);
+
+        assert_runtime_ok(state.route_session_events());
+
+        assert!(matches!(
+            state.take_runtime_events().as_slice(),
+            [RuntimeEvent::UnlockRequested]
+        ));
+        assert!(matches!(
+            state.session_command_intents.as_slice(),
+            [SessionCommandIntent {
+                context: CommandContext::Unlock,
+                command,
+                inhibitor: None,
+            }] if command == "unlock session"
+        ));
+    }
+
+    #[test]
+    fn records_unlock_without_a_configured_command() {
         let mut state = runtime_state();
         state.record_session_event(SessionEvent::UnlockRequested);
 
