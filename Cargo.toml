@@ -22,6 +22,11 @@ wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 zbus = "5.18"
 
+[dev-dependencies]
+tempfile = "3.27"
+wayland-protocols = { version = "0.32", features = ["server", "staging"] }
+wayland-server = "0.31"
+
 [lints.rust]
 unsafe_code = "deny"
 
