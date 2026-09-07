@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use sweetsidle::{
     command::ProcessError,
     config::Config,
-    runtime::{IdleRuntime, RuntimeEvent},
+    runtime::{ConfigReloadOutcome, IdleRuntime, RuntimeEvent},
 };
 use tracing::{debug, error, info, warn};
 
@@ -108,26 +108,63 @@ fn check_config_file(path: Option<PathBuf>) -> Result<(), String> {
 fn run_daemon(path: Option<PathBuf>, verbose: bool) -> Result<(), String> {
     init_logging(verbose)?;
     let loaded = load_config(path)?;
-    let mut runtime = IdleRuntime::connect(&loaded.config).map_err(|error| error.to_string())?;
+    let mut active_config = loaded.config;
+    let mut runtime = IdleRuntime::connect_with_config_path(&active_config, loaded.path.clone())
+        .map_err(|error| error.to_string())?;
 
     info!(
         config = %loaded.path.display(),
-        listeners = loaded.config.listeners.len(),
-        idle_hint_timeout_seconds = ?loaded.config.idle_hint_timeout_seconds,
+        listeners = active_config.listeners.len(),
+        idle_hint_timeout_seconds = ?active_config.idle_hint_timeout_seconds,
         "sweetsidle started"
     );
 
     loop {
         let events = runtime.dispatch(None).map_err(|error| error.to_string())?;
         let mut shutdown = false;
+        let mut reload = None;
 
         for event in events {
-            shutdown |= log_runtime_event(event);
+            match handle_runtime_event(event) {
+                RuntimeControl::Continue => {}
+                RuntimeControl::Shutdown => shutdown = true,
+                RuntimeControl::Reload(config) => reload = Some(config),
+            }
         }
 
         if shutdown {
             info!("sweetsidle stopped");
             return Ok(());
+        }
+
+        let Some(candidate) = reload else {
+            continue;
+        };
+        if candidate == active_config {
+            info!(config = %loaded.path.display(), "configuration is unchanged");
+            continue;
+        }
+
+        match runtime
+            .reload_config(&candidate)
+            .map_err(|error| error.to_string())?
+        {
+            ConfigReloadOutcome::Applied => {
+                active_config = candidate;
+                info!(
+                    config = %loaded.path.display(),
+                    listeners = active_config.listeners.len(),
+                    idle_hint_timeout_seconds = ?active_config.idle_hint_timeout_seconds,
+                    "configuration reloaded"
+                );
+            }
+            ConfigReloadOutcome::RestartRequired(reason) => {
+                warn!(
+                    config = %loaded.path.display(),
+                    reason,
+                    "configuration reload requires a restart; keeping current configuration"
+                );
+            }
         }
     }
 }
@@ -147,31 +184,46 @@ fn init_logging(verbose: bool) -> Result<(), String> {
         .map_err(|error| format!("failed to initialize logging: {error}"))
 }
 
-fn log_runtime_event(event: RuntimeEvent) -> bool {
+enum RuntimeControl {
+    Continue,
+    Shutdown,
+    Reload(Config),
+}
+
+fn handle_runtime_event(event: RuntimeEvent) -> RuntimeControl {
     match event {
         RuntimeEvent::ShutdownRequested(signal) => {
             info!(signal = signal.name(), "shutdown requested");
-            true
+            RuntimeControl::Shutdown
+        }
+        RuntimeEvent::ConfigReloadRequested => {
+            info!("configuration reload requested");
+            RuntimeControl::Continue
+        }
+        RuntimeEvent::ConfigReloadReady(config) => RuntimeControl::Reload(config),
+        RuntimeEvent::ConfigReloadRejected(error) => {
+            warn!(error = %error, "configuration reload rejected; keeping current configuration");
+            RuntimeControl::Continue
         }
         RuntimeEvent::PreparingForSleep => {
             info!("preparing for system sleep");
-            false
+            RuntimeControl::Continue
         }
         RuntimeEvent::ResumedFromSleep => {
             info!("system resumed from sleep");
-            false
+            RuntimeControl::Continue
         }
         RuntimeEvent::LockRequested => {
             info!("session lock requested");
-            false
+            RuntimeControl::Continue
         }
         RuntimeEvent::UnlockRequested => {
             info!("session unlock requested");
-            false
+            RuntimeControl::Continue
         }
         RuntimeEvent::IdleHintChanged { idle } => {
             debug!(idle, "logind session idle hint changed");
-            false
+            RuntimeControl::Continue
         }
         RuntimeEvent::DbusInhibitorAdded {
             cookie,
@@ -183,7 +235,7 @@ fn log_runtime_event(event: RuntimeEvent) -> bool {
                 cookie,
                 application, reason, active_count, "D-Bus idle inhibitor added"
             );
-            false
+            RuntimeControl::Continue
         }
         RuntimeEvent::DbusInhibitorRemoved {
             cookie,
@@ -195,7 +247,7 @@ fn log_runtime_event(event: RuntimeEvent) -> bool {
                 cookie,
                 application, reason, active_count, "D-Bus idle inhibitor removed"
             );
-            false
+            RuntimeControl::Continue
         }
         RuntimeEvent::DbusInhibitorOwnerDisconnected {
             owner,
@@ -206,7 +258,7 @@ fn log_runtime_event(event: RuntimeEvent) -> bool {
                 owner,
                 released_count, active_count, "released inhibitors for disconnected D-Bus client"
             );
-            false
+            RuntimeControl::Continue
         }
         RuntimeEvent::SystemdIdleInhibitorsChanged {
             inhibitors,
@@ -222,7 +274,7 @@ fn log_runtime_event(event: RuntimeEvent) -> bool {
                     "active systemd idle inhibitor"
                 );
             }
-            false
+            RuntimeControl::Continue
         }
         RuntimeEvent::IdleSuppressed {
             listener_id,
@@ -233,7 +285,7 @@ fn log_runtime_event(event: RuntimeEvent) -> bool {
                 listener = listener_id.index(),
                 active_dbus_inhibitors, active_systemd_inhibitors, "idle action suppressed"
             );
-            false
+            RuntimeControl::Continue
         }
         RuntimeEvent::CommandStarted(start) => {
             info!(
@@ -242,7 +294,7 @@ fn log_runtime_event(event: RuntimeEvent) -> bool {
                 process_id = start.process_id,
                 "command started"
             );
-            false
+            RuntimeControl::Continue
         }
         RuntimeEvent::CommandSkipped(decision) => {
             debug!(
@@ -250,7 +302,7 @@ fn log_runtime_event(event: RuntimeEvent) -> bool {
                 reason = ?decision.reason,
                 "command skipped"
             );
-            false
+            RuntimeControl::Continue
         }
         RuntimeEvent::CommandFinished {
             command,
@@ -271,7 +323,7 @@ fn log_runtime_event(event: RuntimeEvent) -> bool {
                     "command exited unsuccessfully"
                 );
             }
-            false
+            RuntimeControl::Continue
         }
         RuntimeEvent::CommandFailed { command, error } => {
             let source = match &error {
@@ -283,7 +335,7 @@ fn log_runtime_event(event: RuntimeEvent) -> bool {
                 error = %source,
                 "command failed"
             );
-            false
+            RuntimeControl::Continue
         }
     }
 }
@@ -298,10 +350,7 @@ fn load_config(path: Option<PathBuf>) -> Result<LoadedConfig, String> {
         Some(path) => path,
         None => default_config_path()?,
     };
-    let source = std::fs::read_to_string(&path)
-        .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
-    let config = Config::parse(&source)
-        .map_err(|error| format!("invalid config `{}`: {error}", path.display()))?;
+    let config = Config::load(&path).map_err(|error| error.to_string())?;
 
     Ok(LoadedConfig { path, config })
 }

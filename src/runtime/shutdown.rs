@@ -9,7 +9,7 @@ use std::{
 use calloop::{Interest, LoopHandle, Mode, PostAction, generic::Generic};
 use signal_hook::{
     SigId,
-    consts::signal::{SIGINT, SIGTERM},
+    consts::signal::{SIGHUP, SIGINT, SIGTERM},
     low_level::{pipe, unregister},
 };
 
@@ -28,25 +28,24 @@ impl ShutdownSignal {
             Self::Terminate => "SIGTERM",
         }
     }
-
-    fn number(self) -> i32 {
-        match self {
-            Self::Interrupt => SIGINT,
-            Self::Terminate => SIGTERM,
-        }
-    }
 }
 
 pub(super) fn register_sources(
     handle: &LoopHandle<'static, RuntimeState>,
+    reload_enabled: bool,
 ) -> Result<(), RuntimeError> {
-    register_source(handle, ShutdownSignal::Interrupt)?;
-    register_source(handle, ShutdownSignal::Terminate)
+    register_source(handle, RuntimeSignal::Interrupt)?;
+    register_source(handle, RuntimeSignal::Terminate)?;
+    if reload_enabled {
+        register_source(handle, RuntimeSignal::Reload)?;
+    }
+
+    Ok(())
 }
 
 fn register_source(
     handle: &LoopHandle<'static, RuntimeState>,
-    signal: ShutdownSignal,
+    signal: RuntimeSignal,
 ) -> Result<(), RuntimeError> {
     let source = SignalPipe::new(signal)?;
 
@@ -55,7 +54,15 @@ fn register_source(
             Generic::new(source, Interest::READ, Mode::Level),
             move |_, source, state: &mut RuntimeState| {
                 source.drain()?;
-                state.request_shutdown(signal);
+                match signal {
+                    RuntimeSignal::Interrupt => {
+                        state.request_shutdown(ShutdownSignal::Interrupt);
+                    }
+                    RuntimeSignal::Terminate => {
+                        state.request_shutdown(ShutdownSignal::Terminate);
+                    }
+                    RuntimeSignal::Reload => state.request_reload(),
+                }
                 Ok::<PostAction, io::Error>(PostAction::Continue)
             },
         )
@@ -67,13 +74,38 @@ fn register_source(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+enum RuntimeSignal {
+    Interrupt,
+    Terminate,
+    Reload,
+}
+
+impl RuntimeSignal {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Interrupt => "SIGINT",
+            Self::Terminate => "SIGTERM",
+            Self::Reload => "SIGHUP",
+        }
+    }
+
+    fn number(self) -> i32 {
+        match self {
+            Self::Interrupt => SIGINT,
+            Self::Terminate => SIGTERM,
+            Self::Reload => SIGHUP,
+        }
+    }
+}
+
 struct SignalPipe {
     read: UnixStream,
     registration: SigId,
 }
 
 impl SignalPipe {
-    fn new(signal: ShutdownSignal) -> Result<Self, RuntimeError> {
+    fn new(signal: RuntimeSignal) -> Result<Self, RuntimeError> {
         let (read, write) =
             UnixStream::pair().map_err(|source| RuntimeError::CreateSignalPipe {
                 signal: signal.name(),
@@ -124,16 +156,19 @@ impl Drop for SignalPipe {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{path::PathBuf, time::Duration};
 
     use calloop::EventLoop;
-    use signal_hook::{consts::signal::SIGINT, low_level::raise};
+    use signal_hook::{
+        consts::signal::{SIGHUP, SIGINT},
+        low_level::raise,
+    };
 
-    use super::{ShutdownSignal, register_sources};
+    use super::{RuntimeSignal, ShutdownSignal, register_source};
     use crate::{
         config::Config,
         listener::ListenerSet,
-        runtime::{RuntimeEvent, state::RuntimeState},
+        runtime::{RuntimeEvent, reload::ConfigReloadMonitor, state::RuntimeState},
         wayland::IdleWaylandState,
     };
 
@@ -145,9 +180,9 @@ mod tests {
         };
         let config = Config::default();
         let listeners = ListenerSet::from_config(&config);
-        let mut state = RuntimeState::new(IdleWaylandState::default(), listeners, &config);
+        let mut state = RuntimeState::new(IdleWaylandState::default(), listeners, &config, None);
 
-        if let Err(error) = register_sources(&event_loop.handle()) {
+        if let Err(error) = register_source(&event_loop.handle(), RuntimeSignal::Interrupt) {
             panic!("failed to register signal sources: {error}");
         }
         if let Err(error) = raise(SIGINT) {
@@ -161,6 +196,42 @@ mod tests {
         assert!(matches!(
             state.take_runtime_events().as_slice(),
             [RuntimeEvent::ShutdownRequested(ShutdownSignal::Interrupt)]
+        ));
+    }
+
+    #[test]
+    fn sighup_wakes_the_event_loop_and_requests_reload() {
+        let mut event_loop = match EventLoop::try_new() {
+            Ok(event_loop) => event_loop,
+            Err(error) => panic!("failed to create test event loop: {error}"),
+        };
+        let config = Config::default();
+        let listeners = ListenerSet::from_config(&config);
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config/example.kdl");
+        let (_monitor, requester, _events) = match ConfigReloadMonitor::connect(path) {
+            Ok(parts) => parts,
+            Err(error) => panic!("failed to start reload monitor: {error}"),
+        };
+        let mut state = RuntimeState::new(
+            IdleWaylandState::default(),
+            listeners,
+            &config,
+            Some(requester),
+        );
+
+        if let Err(error) = register_source(&event_loop.handle(), RuntimeSignal::Reload) {
+            panic!("failed to register reload signal source: {error}");
+        }
+        if let Err(error) = raise(SIGHUP) {
+            panic!("failed to raise SIGHUP: {error}");
+        }
+        if let Err(error) = event_loop.dispatch(Some(Duration::from_secs(1)), &mut state) {
+            panic!("failed to dispatch signal event: {error}");
+        }
+
+        assert!(matches!(
+            state.take_runtime_events().as_slice(),
+            [RuntimeEvent::ConfigReloadRequested]
         ));
     }
 }
