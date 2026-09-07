@@ -21,7 +21,7 @@ fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
         Action::Help => print_help(),
         Action::Version => println!("sweetsidle {VERSION}"),
         Action::CheckConfig(path) => check_config_file(path)?,
-        Action::Run(path) => run_daemon(path)?,
+        Action::Run { path, verbose } => run_daemon(path, verbose)?,
     }
 
     Ok(())
@@ -32,18 +32,23 @@ enum Action {
     Help,
     Version,
     CheckConfig(Option<PathBuf>),
-    Run(Option<PathBuf>),
+    Run {
+        path: Option<PathBuf>,
+        verbose: bool,
+    },
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Action, String> {
     let mut check_config = false;
     let mut config_path = None;
+    let mut verbose = false;
     let mut args = args.into_iter();
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(Action::Help),
             "-V" | "--version" => return Ok(Action::Version),
+            "-v" | "--verbose" => verbose = true,
             "--check-config" => check_config = true,
             "-c" | "--config" => {
                 let path = args
@@ -56,9 +61,15 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Action, String> 
     }
 
     if check_config {
+        if verbose {
+            return Err("`--verbose` cannot be used with `--check-config`".to_string());
+        }
         Ok(Action::CheckConfig(config_path))
     } else {
-        Ok(Action::Run(config_path))
+        Ok(Action::Run {
+            path: config_path,
+            verbose,
+        })
     }
 }
 
@@ -72,6 +83,7 @@ Usage: sweetsidle [OPTIONS]
 Options:
   -c, --config <PATH>  Use a specific config file
       --check-config   Parse and validate the config file, then exit
+  -v, --verbose        Enable debug logging while running
   -h, --help           Print help
   -V, --version        Print version
 "
@@ -87,8 +99,8 @@ fn check_config_file(path: Option<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
-fn run_daemon(path: Option<PathBuf>) -> Result<(), String> {
-    init_logging()?;
+fn run_daemon(path: Option<PathBuf>, verbose: bool) -> Result<(), String> {
+    init_logging(verbose)?;
     let loaded = load_config(path)?;
     let mut runtime = IdleRuntime::connect(&loaded.config).map_err(|error| error.to_string())?;
 
@@ -113,9 +125,15 @@ fn run_daemon(path: Option<PathBuf>) -> Result<(), String> {
     }
 }
 
-fn init_logging() -> Result<(), String> {
+fn init_logging(verbose: bool) -> Result<(), String> {
+    let level = if verbose {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::INFO
+    };
+
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(level)
         .with_target(false)
         .without_time()
         .try_init()
@@ -292,14 +310,42 @@ mod tests {
 
     #[test]
     fn no_arguments_runs_with_the_default_config() {
-        assert_eq!(parse_args(Vec::new()), Ok(Action::Run(None)));
+        assert_eq!(
+            parse_args(Vec::new()),
+            Ok(Action::Run {
+                path: None,
+                verbose: false,
+            })
+        );
     }
 
     #[test]
     fn config_path_selects_daemon_startup() {
         assert_eq!(
             parse_args(["--config".to_string(), "idle.kdl".to_string()]),
-            Ok(Action::Run(Some(PathBuf::from("idle.kdl"))))
+            Ok(Action::Run {
+                path: Some(PathBuf::from("idle.kdl")),
+                verbose: false,
+            })
+        );
+    }
+
+    #[test]
+    fn verbose_enables_debug_logging_for_daemon_startup() {
+        assert_eq!(
+            parse_args(["--verbose".to_string()]),
+            Ok(Action::Run {
+                path: None,
+                verbose: true,
+            })
+        );
+    }
+
+    #[test]
+    fn check_config_rejects_verbose_logging() {
+        assert_eq!(
+            parse_args(["--check-config".to_string(), "--verbose".to_string()]),
+            Err("`--verbose` cannot be used with `--check-config`".to_string())
         );
     }
 
