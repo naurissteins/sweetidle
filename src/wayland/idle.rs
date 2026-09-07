@@ -210,6 +210,20 @@ impl IdleWaylandState {
 
         Ok(())
     }
+
+    pub(crate) fn reconfigure_notifications(
+        &mut self,
+        listeners: &[TimeoutRequest],
+        idle_hint_timeout: Option<Duration>,
+    ) -> Result<(), IdleWaylandError> {
+        let requests = notification_requests(listeners, idle_hint_timeout);
+        for request in &requests {
+            timeout_millis(request)?;
+        }
+
+        self.requests = requests;
+        self.reset_notifications()
+    }
 }
 
 fn bind_idle_notifier(
@@ -441,6 +455,25 @@ mod tests {
             timeout_millis(&request),
             Err(IdleWaylandError::IdleHintTimeoutTooLarge(timeout)) if timeout == request.timeout
         ));
+    }
+
+    #[test]
+    fn failed_reconfiguration_preserves_existing_requests() {
+        let existing = notification_request(0, 60);
+        let mut state = IdleWaylandState {
+            requests: vec![existing],
+            ..IdleWaylandState::default()
+        };
+        let oversized = TimeoutRequest {
+            listener_id: ListenerId::from_index(1),
+            timeout: Duration::from_millis(u64::from(u32::MAX) + 1),
+        };
+
+        assert!(matches!(
+            state.reconfigure_notifications(&[oversized], None),
+            Err(IdleWaylandError::TimeoutTooLarge { .. })
+        ));
+        assert_eq!(state.requests, vec![existing]);
     }
 
     #[test]

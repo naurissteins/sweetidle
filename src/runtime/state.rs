@@ -1,12 +1,16 @@
 use std::{
     collections::{HashMap, HashSet},
     io,
+    time::Duration,
 };
 
 use calloop::{Interest, LoopHandle, Mode, PostAction, generic::Generic};
 use rustix::process::{Pid, PidfdFlags, pidfd_open};
 
-use super::{RuntimeError, RuntimeEvent, ShutdownSignal};
+use super::{
+    RuntimeError, RuntimeEvent, ShutdownSignal,
+    reload::{ConfigReloadEvent, ConfigReloadRequester},
+};
 use crate::{
     command::{
         CommandContext, CommandDispatcher, CommandId, DispatchDecision, ProcessAdapter,
@@ -31,6 +35,11 @@ pub(super) struct RuntimeState {
     session_channel_closed: bool,
     dbus_inhibit_events: Vec<DbusInhibitEvent>,
     dbus_inhibit_channel_closed: bool,
+    reload_requester: Option<ConfigReloadRequester>,
+    reload_events: Vec<ConfigReloadEvent>,
+    reload_request_failed: bool,
+    reload_channel_closed: bool,
+    reload_pending: bool,
     active_dbus_inhibitors: usize,
     active_systemd_inhibitors: usize,
     idle_hint_state: Option<bool>,
@@ -46,7 +55,12 @@ pub(super) struct RuntimeState {
 }
 
 impl RuntimeState {
-    pub(super) fn new(wayland: IdleWaylandState, listeners: ListenerSet, config: &Config) -> Self {
+    pub(super) fn new(
+        wayland: IdleWaylandState,
+        listeners: ListenerSet,
+        config: &Config,
+        reload_requester: Option<ConfigReloadRequester>,
+    ) -> Self {
         Self {
             wayland,
             listeners,
@@ -60,6 +74,11 @@ impl RuntimeState {
             session_channel_closed: false,
             dbus_inhibit_events: Vec::new(),
             dbus_inhibit_channel_closed: false,
+            reload_requester,
+            reload_events: Vec::new(),
+            reload_request_failed: false,
+            reload_channel_closed: false,
+            reload_pending: false,
             active_dbus_inhibitors: 0,
             active_systemd_inhibitors: 0,
             idle_hint_state: config.idle_hint_timeout_seconds.map(|_| false),
@@ -79,6 +98,23 @@ impl RuntimeState {
         for event in self.wayland.take_events() {
             self.route_idle_event(event)?;
         }
+
+        Ok(())
+    }
+
+    pub(super) fn apply_config(&mut self, config: &Config) -> Result<(), RuntimeError> {
+        let listeners = ListenerSet::from_config(config);
+        self.wayland.reconfigure_notifications(
+            &listeners.timeout_requests(),
+            config.idle_hint_timeout_seconds.map(Duration::from_secs),
+        )?;
+
+        self.listeners = listeners;
+        self.lock_command = config.general.lock_command.clone();
+        self.unlock_command = config.general.unlock_command.clone();
+        self.before_sleep_command = config.general.before_sleep_command.clone();
+        self.after_resume_command = config.general.after_resume_command.clone();
+        self.set_idle_hint(false);
 
         Ok(())
     }
@@ -154,6 +190,57 @@ impl RuntimeState {
 
     pub(super) fn record_session_event(&mut self, event: SessionEvent) {
         self.session_events.push(event);
+    }
+
+    pub(super) fn request_reload(&mut self) {
+        if self.reload_pending || self.shutdown.is_some() {
+            return;
+        }
+        let Some(requester) = self.reload_requester.as_ref() else {
+            return;
+        };
+
+        match requester.request() {
+            Ok(()) => {
+                self.reload_pending = true;
+                self.runtime_events
+                    .push(RuntimeEvent::ConfigReloadRequested);
+            }
+            Err(_) => self.reload_request_failed = true,
+        }
+    }
+
+    pub(super) fn record_reload_event(&mut self, event: ConfigReloadEvent) {
+        self.reload_events.push(event);
+    }
+
+    pub(super) fn mark_reload_channel_closed(&mut self) {
+        self.reload_channel_closed = true;
+    }
+
+    pub(super) fn route_reload_events(&mut self) -> Result<(), RuntimeError> {
+        for event in std::mem::take(&mut self.reload_events) {
+            self.reload_pending = false;
+            match event {
+                ConfigReloadEvent::Ready(config) => {
+                    self.runtime_events
+                        .push(RuntimeEvent::ConfigReloadReady(config));
+                }
+                ConfigReloadEvent::Rejected(error) => {
+                    self.runtime_events
+                        .push(RuntimeEvent::ConfigReloadRejected(error));
+                }
+            }
+        }
+
+        if self.reload_request_failed {
+            return Err(RuntimeError::ReloadRequestChannelClosed);
+        }
+        if self.reload_channel_closed {
+            return Err(RuntimeError::ReloadResultChannelClosed);
+        }
+
+        Ok(())
     }
 
     pub(super) fn mark_session_channel_closed(&mut self) {
@@ -296,6 +383,7 @@ impl RuntimeState {
         self.wayland.take_events();
         self.session_events.clear();
         self.dbus_inhibit_events.clear();
+        self.reload_events.clear();
         self.command_intents.clear();
         self.session_command_intents.clear();
         self.idle_hint_updates.clear();
@@ -495,7 +583,7 @@ mod tests {
 
     use calloop::EventLoop;
 
-    use super::{RuntimeState, SessionCommandIntent};
+    use super::{ConfigReloadEvent, RuntimeState, SessionCommandIntent};
     use crate::{
         command::CommandContext,
         config::{Config, GeneralConfig, ListenerConfig},
@@ -553,6 +641,44 @@ mod tests {
                 intent(0, CommandKind::Timeout, "lock")
             ]
         );
+    }
+
+    #[test]
+    fn applying_config_replaces_listener_policy() {
+        let mut state = runtime_state();
+        let config = Config {
+            general: GeneralConfig::default(),
+            idle_hint_timeout_seconds: None,
+            listeners: vec![ListenerConfig {
+                timeout_seconds: 45,
+                on_timeout: Some("new lock".to_string()),
+                on_resume: None,
+            }],
+        };
+
+        assert_runtime_ok(state.apply_config(&config));
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(0))));
+
+        assert_eq!(
+            state.command_intents,
+            vec![intent(0, CommandKind::Timeout, "new lock")]
+        );
+    }
+
+    #[test]
+    fn applying_config_restarts_an_active_idle_hint() {
+        let mut state = idle_hint_runtime_state();
+        assert_runtime_ok(state.route_idle_event(IdleEvent::IdleHintIdled));
+        state.take_idle_hint_updates();
+        state.take_runtime_events();
+        let config = Config {
+            idle_hint_timeout_seconds: Some(600),
+            ..Config::default()
+        };
+
+        assert_runtime_ok(state.apply_config(&config));
+
+        assert_eq!(state.take_idle_hint_updates(), vec![false]);
     }
 
     #[test]
@@ -770,6 +896,27 @@ mod tests {
         assert!(matches!(
             state.take_runtime_events().as_slice(),
             [RuntimeEvent::ShutdownRequested(ShutdownSignal::Interrupt)]
+        ));
+    }
+
+    #[test]
+    fn rejected_reload_keeps_runtime_available_for_another_request() {
+        let mut state = runtime_state();
+        state.reload_pending = true;
+        let error = match Config::load(std::path::Path::new(
+            "/definitely-missing-sweetsidle-config.kdl",
+        )) {
+            Ok(config) => panic!("unexpected config: {config:?}"),
+            Err(error) => error,
+        };
+        state.record_reload_event(ConfigReloadEvent::Rejected(error));
+
+        assert_runtime_ok(state.route_reload_events());
+
+        assert!(!state.reload_pending);
+        assert!(matches!(
+            state.take_runtime_events().as_slice(),
+            [RuntimeEvent::ConfigReloadRejected(_)]
         ));
     }
 
@@ -999,6 +1146,7 @@ mod tests {
             IdleWaylandState::default(),
             ListenerSet::from_config(&config),
             &config,
+            None,
         )
     }
 

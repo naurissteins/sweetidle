@@ -12,6 +12,10 @@ pub enum RuntimeError {
     Wayland(IdleWaylandError),
     CreateEventLoop(calloop::Error),
     RegisterWayland(calloop::Error),
+    SpawnReloadWorker(io::Error),
+    RegisterReload(calloop::Error),
+    ReloadRequestChannelClosed,
+    ReloadResultChannelClosed,
     Session(SessionError),
     RegisterSession(calloop::Error),
     SessionChannelClosed,
@@ -62,6 +66,21 @@ impl fmt::Display for RuntimeError {
                     formatter,
                     "failed to register Wayland event source: {source}"
                 )
+            }
+            Self::SpawnReloadWorker(source) => {
+                write!(formatter, "failed to start config reload worker: {source}")
+            }
+            Self::RegisterReload(source) => {
+                write!(
+                    formatter,
+                    "failed to register config reload source: {source}"
+                )
+            }
+            Self::ReloadRequestChannelClosed => {
+                write!(formatter, "config reload request channel closed")
+            }
+            Self::ReloadResultChannelClosed => {
+                write!(formatter, "config reload result channel closed")
             }
             Self::Session(source) => write!(formatter, "logind integration failed: {source}"),
             Self::RegisterSession(source) => {
@@ -141,6 +160,7 @@ impl Error for RuntimeError {
             Self::Wayland(source) => Some(source),
             Self::CreateEventLoop(source)
             | Self::RegisterWayland(source)
+            | Self::RegisterReload(source)
             | Self::RegisterSession(source)
             | Self::RegisterDbusInhibit(source)
             | Self::Dispatch(source)
@@ -148,6 +168,7 @@ impl Error for RuntimeError {
             Self::CreateSignalPipe { source, .. } | Self::RegisterSignalHandler { source, .. } => {
                 Some(source)
             }
+            Self::SpawnReloadWorker(source) => Some(source),
             Self::RegisterSignalSource { source, .. } => Some(source),
             Self::Process(source) => Some(source),
             Self::Session(source) => Some(source),
@@ -155,6 +176,8 @@ impl Error for RuntimeError {
             Self::CommandDispatch(source) => Some(source),
             Self::MonitorProcess { source, .. } => Some(source),
             Self::Listener(_)
+            | Self::ReloadRequestChannelClosed
+            | Self::ReloadResultChannelClosed
             | Self::SessionChannelClosed
             | Self::IdleHintMonitorMissing
             | Self::DbusInhibitChannelClosed

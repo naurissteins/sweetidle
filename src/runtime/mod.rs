@@ -1,8 +1,9 @@
 mod error;
+mod reload;
 mod shutdown;
 mod state;
 
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use calloop::{EventLoop, channel::Event as ChannelEvent};
 use calloop_wayland_source::WaylandSource;
@@ -10,10 +11,14 @@ use calloop_wayland_source::WaylandSource;
 pub use error::RuntimeError;
 pub use shutdown::ShutdownSignal;
 
-use self::{shutdown::register_sources, state::RuntimeState};
+use self::{
+    reload::{ConfigReloadMonitor, ConfigReloadRequester},
+    shutdown::register_sources,
+    state::RuntimeState,
+};
 use crate::{
     command::{FinishedCommand, ProcessCompletion, ProcessError, ProcessStart, SkipDecision},
-    config::Config,
+    config::{Config, ConfigLoadError},
     listener::ListenerSet,
     session::{DbusInhibitMonitor, LogindFeatures, LogindMonitor, SystemdIdleInhibitor},
     wayland::IdleWaylandConnection,
@@ -22,6 +27,9 @@ use crate::{
 #[derive(Debug)]
 pub enum RuntimeEvent {
     ShutdownRequested(ShutdownSignal),
+    ConfigReloadRequested,
+    ConfigReloadReady(Config),
+    ConfigReloadRejected(ConfigLoadError),
     PreparingForSleep,
     ResumedFromSleep,
     LockRequested,
@@ -67,15 +75,34 @@ pub enum RuntimeEvent {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigReloadOutcome {
+    Applied,
+    RestartRequired(&'static str),
+}
+
 pub struct IdleRuntime {
     event_loop: EventLoop<'static, RuntimeState>,
     state: RuntimeState,
+    integration_features: IntegrationFeatures,
+    _reload: Option<ConfigReloadMonitor>,
     logind: Option<LogindMonitor>,
     _dbus_inhibit: Option<DbusInhibitMonitor>,
 }
 
 impl IdleRuntime {
     pub fn connect(config: &Config) -> Result<Self, RuntimeError> {
+        Self::connect_inner(config, None)
+    }
+
+    pub fn connect_with_config_path(
+        config: &Config,
+        config_path: PathBuf,
+    ) -> Result<Self, RuntimeError> {
+        Self::connect_inner(config, Some(config_path))
+    }
+
+    fn connect_inner(config: &Config, config_path: Option<PathBuf>) -> Result<Self, RuntimeError> {
         let listeners = ListenerSet::from_config(config);
         let idle_hint_timeout = config.idle_hint_timeout_seconds.map(Duration::from_secs);
         let wayland =
@@ -90,13 +117,16 @@ impl IdleRuntime {
                 event_queue.dispatch_pending(&mut state.wayland)
             })
             .map_err(|error| RuntimeError::RegisterWayland(error.error))?;
-        register_sources(&event_loop.handle())?;
+        let (reload, reload_requester) = register_reload(config_path, &event_loop)?;
+        register_sources(&event_loop.handle(), reload_requester.is_some())?;
         let logind = register_logind(config, &event_loop)?;
         let dbus_inhibit = register_dbus_inhibit(config, &event_loop)?;
 
         Ok(Self {
             event_loop,
-            state: RuntimeState::new(parts.state, listeners, config),
+            state: RuntimeState::new(parts.state, listeners, config, reload_requester),
+            integration_features: IntegrationFeatures::from_config(config),
+            _reload: reload,
             logind,
             _dbus_inhibit: dbus_inhibit,
         })
@@ -117,19 +147,87 @@ impl IdleRuntime {
         }
 
         self.state.route_dbus_inhibit_events()?;
+        self.state.route_reload_events()?;
         self.state.route_session_events()?;
         self.state.route_wayland_events()?;
+        self.flush_idle_hint_updates()?;
+        self.state
+            .dispatch_command_intents(&self.event_loop.handle())?;
+
+        Ok(self.state.take_runtime_events())
+    }
+
+    pub fn reload_config(
+        &mut self,
+        candidate: &Config,
+    ) -> Result<ConfigReloadOutcome, RuntimeError> {
+        let candidate_features = IntegrationFeatures::from_config(candidate);
+        if let Some(reason) = reload_restart_reason(self.integration_features, candidate_features) {
+            return Ok(ConfigReloadOutcome::RestartRequired(reason));
+        }
+
+        self.state.apply_config(candidate)?;
+        self.flush_idle_hint_updates()?;
+        Ok(ConfigReloadOutcome::Applied)
+    }
+
+    fn flush_idle_hint_updates(&mut self) -> Result<(), RuntimeError> {
         for idle in self.state.take_idle_hint_updates() {
             self.logind
                 .as_ref()
                 .ok_or(RuntimeError::IdleHintMonitorMissing)?
                 .set_idle_hint(idle)?;
         }
-        self.state
-            .dispatch_command_intents(&self.event_loop.handle())?;
 
-        Ok(self.state.take_runtime_events())
+        Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IntegrationFeatures {
+    dbus_inhibit: bool,
+    logind: Option<LogindFeatures>,
+}
+
+impl IntegrationFeatures {
+    fn from_config(config: &Config) -> Self {
+        Self {
+            dbus_inhibit: dbus_inhibit_enabled(config),
+            logind: logind_features(config),
+        }
+    }
+}
+
+fn reload_restart_reason(
+    active: IntegrationFeatures,
+    candidate: IntegrationFeatures,
+) -> Option<&'static str> {
+    if active.dbus_inhibit != candidate.dbus_inhibit {
+        Some("changing D-Bus inhibitor monitoring")
+    } else if active.logind != candidate.logind {
+        Some("changing logind integration features")
+    } else {
+        None
+    }
+}
+
+fn register_reload(
+    config_path: Option<PathBuf>,
+    event_loop: &EventLoop<'static, RuntimeState>,
+) -> Result<(Option<ConfigReloadMonitor>, Option<ConfigReloadRequester>), RuntimeError> {
+    let Some(path) = config_path else {
+        return Ok((None, None));
+    };
+    let (monitor, requester, source) = ConfigReloadMonitor::connect(path)?;
+    event_loop
+        .handle()
+        .insert_source(source, |event, _, state: &mut RuntimeState| match event {
+            ChannelEvent::Msg(event) => state.record_reload_event(event),
+            ChannelEvent::Closed => state.mark_reload_channel_closed(),
+        })
+        .map_err(|error| RuntimeError::RegisterReload(error.error))?;
+
+    Ok((Some(monitor), Some(requester)))
 }
 
 fn register_dbus_inhibit(
@@ -196,7 +294,9 @@ fn logind_features(config: &Config) -> Option<LogindFeatures> {
 
 #[cfg(test)]
 mod tests {
-    use super::{dbus_inhibit_enabled, logind_features};
+    use super::{
+        IntegrationFeatures, dbus_inhibit_enabled, logind_features, reload_restart_reason,
+    };
     use crate::config::Config;
     use crate::session::LogindFeatures;
 
@@ -323,5 +423,55 @@ mod tests {
         config.general.ignore_dbus_inhibit = true;
 
         assert!(!dbus_inhibit_enabled(&config));
+    }
+
+    #[test]
+    fn listener_changes_can_reload_without_restarting_integrations() {
+        let active = Config::default();
+        let mut candidate = active.clone();
+        candidate.listeners.push(crate::config::ListenerConfig {
+            timeout_seconds: 30,
+            on_timeout: Some("lock".to_string()),
+            on_resume: None,
+        });
+
+        assert_eq!(
+            reload_restart_reason(
+                IntegrationFeatures::from_config(&active),
+                IntegrationFeatures::from_config(&candidate),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn changing_dbus_monitoring_requires_restart() {
+        let active = Config::default();
+        let mut candidate = active.clone();
+        candidate.general.ignore_dbus_inhibit = true;
+
+        assert_eq!(
+            reload_restart_reason(
+                IntegrationFeatures::from_config(&active),
+                IntegrationFeatures::from_config(&candidate),
+            ),
+            Some("changing D-Bus inhibitor monitoring")
+        );
+    }
+
+    #[test]
+    fn enabling_a_new_logind_feature_requires_restart() {
+        let mut active = Config::default();
+        active.general.ignore_systemd_inhibit = true;
+        let mut candidate = active.clone();
+        candidate.general.lock_command = Some("lock".to_string());
+
+        assert_eq!(
+            reload_restart_reason(
+                IntegrationFeatures::from_config(&active),
+                IntegrationFeatures::from_config(&candidate),
+            ),
+            Some("changing logind integration features")
+        );
     }
 }
