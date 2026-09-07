@@ -15,6 +15,8 @@ use zbus::{
     zvariant::{OwnedFd, OwnedObjectPath},
 };
 
+use super::{LogindInhibitor, SystemdIdleInhibitor, idle_block_inhibitors};
+
 #[proxy(
     interface = "org.freedesktop.login1.Manager",
     default_service = "org.freedesktop.login1",
@@ -28,11 +30,16 @@ trait LogindManager {
 
     fn inhibit(&self, what: &str, who: &str, why: &str, mode: &str) -> zbus::Result<OwnedFd>;
 
+    fn list_inhibitors(&self) -> zbus::Result<Vec<LogindInhibitor>>;
+
     #[zbus(signal)]
     fn prepare_for_sleep(&self, active: bool) -> zbus::Result<()>;
 
     #[zbus(property)]
     fn preparing_for_sleep(&self) -> zbus::Result<bool>;
+
+    #[zbus(property)]
+    fn block_inhibited(&self) -> zbus::Result<String>;
 }
 
 #[proxy(
@@ -65,6 +72,7 @@ pub(crate) enum SessionEvent {
     Resumed,
     LockRequested,
     UnlockRequested,
+    SystemdIdleInhibitorsChanged(Vec<SystemdIdleInhibitor>),
     Failed(SessionError),
 }
 
@@ -73,6 +81,7 @@ pub(crate) struct LogindFeatures {
     pub(crate) sleep_events: bool,
     pub(crate) delay_inhibitor: bool,
     pub(crate) session_events: bool,
+    pub(crate) idle_inhibitors: bool,
 }
 
 pub(crate) struct LogindMonitor {
@@ -94,6 +103,7 @@ pub enum SessionError {
     Subscribe(zbus::Error),
     SubscribeSession(zbus::Error),
     QueryState(zbus::Error),
+    QueryInhibitors(zbus::Error),
     Inhibit(zbus::Error),
     DecodeSignal(zbus::Error),
     Disconnected,
@@ -187,6 +197,12 @@ impl fmt::Display for SessionError {
             Self::QueryState(source) => {
                 write!(formatter, "failed to query logind sleep state: {source}")
             }
+            Self::QueryInhibitors(source) => {
+                write!(
+                    formatter,
+                    "failed to query logind idle inhibitors: {source}"
+                )
+            }
             Self::Inhibit(source) => {
                 write!(
                     formatter,
@@ -211,6 +227,7 @@ impl Error for SessionError {
             | Self::Subscribe(source)
             | Self::SubscribeSession(source)
             | Self::QueryState(source)
+            | Self::QueryInhibitors(source)
             | Self::Inhibit(source)
             | Self::DecodeSignal(source) => Some(source),
             Self::ResolveSession { by_process_id, .. } => Some(by_process_id.as_ref()),
@@ -300,6 +317,19 @@ async fn worker_loop(
         },
         None => None,
     };
+    let mut idle_inhibitor_changes = if features.idle_inhibitors {
+        Some(proxy.receive_block_inhibited_changed().await)
+    } else {
+        None
+    };
+    let mut idle_inhibitors = if features.idle_inhibitors {
+        match query_idle_inhibitors(&proxy).await {
+            Ok(inhibitors) => inhibitors,
+            Err(error) => return report_initialization_error(ready, error),
+        }
+    } else {
+        Vec::new()
+    };
     let mut inhibitor = if features.delay_inhibitor {
         match acquire_delay_inhibitor(&proxy).await {
             Ok(inhibitor) => Some(inhibitor),
@@ -319,6 +349,15 @@ async fn worker_loop(
         false
     };
 
+    if !idle_inhibitors.is_empty()
+        && events
+            .send(SessionEvent::SystemdIdleInhibitorsChanged(
+                idle_inhibitors.clone(),
+            ))
+            .is_err()
+    {
+        return Ok(());
+    }
     if ready.send(Ok(())).is_err() {
         return Ok(());
     }
@@ -355,12 +394,22 @@ async fn worker_loop(
                 },
             ),
             future::race(
-                async {
-                    match unlock_signals.as_mut() {
-                        Some(signals) => WorkerInput::Unlock(signals.next().await.is_some()),
-                        None => pending().await,
-                    }
-                },
+                future::race(
+                    async {
+                        match unlock_signals.as_mut() {
+                            Some(signals) => WorkerInput::Unlock(signals.next().await.is_some()),
+                            None => pending().await,
+                        }
+                    },
+                    async {
+                        match idle_inhibitor_changes.as_mut() {
+                            Some(changes) => {
+                                WorkerInput::IdleInhibitorsChanged(changes.next().await.is_some())
+                            }
+                            None => pending().await,
+                        }
+                    },
+                ),
                 async {
                     let _ = shutdown.recv().await;
                     WorkerInput::Shutdown
@@ -388,7 +437,10 @@ async fn worker_loop(
             }
             WorkerInput::Sleep(Ok(None))
             | WorkerInput::Lock(false)
-            | WorkerInput::Unlock(false) => return Err(SessionError::Disconnected),
+            | WorkerInput::Unlock(false)
+            | WorkerInput::IdleInhibitorsChanged(false) => {
+                return Err(SessionError::Disconnected);
+            }
             WorkerInput::Sleep(Err(error)) => return Err(error),
             WorkerInput::Lock(true) => {
                 if events.send(SessionEvent::LockRequested).is_err() {
@@ -398,6 +450,20 @@ async fn worker_loop(
             WorkerInput::Unlock(true) => {
                 if events.send(SessionEvent::UnlockRequested).is_err() {
                     return Ok(());
+                }
+            }
+            WorkerInput::IdleInhibitorsChanged(true) => {
+                let next = query_idle_inhibitors(&proxy).await?;
+                if next != idle_inhibitors {
+                    idle_inhibitors = next;
+                    if events
+                        .send(SessionEvent::SystemdIdleInhibitorsChanged(
+                            idle_inhibitors.clone(),
+                        ))
+                        .is_err()
+                    {
+                        return Ok(());
+                    }
                 }
             }
             WorkerInput::Shutdown => return Ok(()),
@@ -443,6 +509,16 @@ async fn acquire_delay_inhibitor(
         .map_err(SessionError::Inhibit)
 }
 
+async fn query_idle_inhibitors(
+    proxy: &LogindManagerProxy<'_>,
+) -> Result<Vec<SystemdIdleInhibitor>, SessionError> {
+    proxy
+        .list_inhibitors()
+        .await
+        .map(idle_block_inhibitors)
+        .map_err(SessionError::QueryInhibitors)
+}
+
 fn report_initialization_error<T>(
     ready: &SyncSender<Result<(), SessionError>>,
     error: SessionError,
@@ -455,12 +531,15 @@ enum WorkerInput {
     Sleep(Result<Option<bool>, SessionError>),
     Lock(bool),
     Unlock(bool),
+    IdleInhibitorsChanged(bool),
     Shutdown,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{LogindFeatures, LogindMonitor};
+    use std::{sync::mpsc::TryRecvError, thread, time::Duration};
+
+    use super::{LogindFeatures, LogindManagerProxy, LogindMonitor, SessionEvent};
 
     #[test]
     #[ignore = "requires access to systemd-logind"]
@@ -469,11 +548,77 @@ mod tests {
             sleep_events: true,
             delay_inhibitor: true,
             session_events: true,
+            idle_inhibitors: true,
         }) {
             Ok(parts) => parts,
             Err(error) => panic!("failed to initialize logind monitor: {error}"),
         };
 
         drop(monitor);
+    }
+
+    #[test]
+    #[ignore = "requires access to systemd-logind"]
+    fn observes_idle_block_inhibitor_lifecycle() {
+        let (monitor, events) = match LogindMonitor::connect(LogindFeatures {
+            sleep_events: false,
+            delay_inhibitor: false,
+            session_events: false,
+            idle_inhibitors: true,
+        }) {
+            Ok(parts) => parts,
+            Err(error) => panic!("failed to initialize logind monitor: {error}"),
+        };
+
+        let inhibitor = async_io::block_on(async {
+            let connection = match zbus::Connection::system().await {
+                Ok(connection) => connection,
+                Err(error) => panic!("failed to connect test client to system D-Bus: {error}"),
+            };
+            let proxy = match LogindManagerProxy::new(&connection).await {
+                Ok(proxy) => proxy,
+                Err(error) => panic!("failed to create test logind proxy: {error}"),
+            };
+            match proxy
+                .inhibit(
+                    "idle",
+                    "sweetsidle integration test",
+                    "verify idle inhibitor monitoring",
+                    "block",
+                )
+                .await
+            {
+                Ok(inhibitor) => inhibitor,
+                Err(error) => panic!("failed to acquire test idle inhibitor: {error}"),
+            }
+        });
+
+        wait_for_inhibitor_state(&events, true);
+        drop(inhibitor);
+        wait_for_inhibitor_state(&events, false);
+        drop(monitor);
+    }
+
+    fn wait_for_inhibitor_state(
+        events: &calloop::channel::Channel<SessionEvent>,
+        expected_active: bool,
+    ) {
+        for _ in 0..100 {
+            match events.try_recv() {
+                Ok(SessionEvent::SystemdIdleInhibitorsChanged(inhibitors))
+                    if inhibitors
+                        .iter()
+                        .any(|inhibitor| inhibitor.who == "sweetsidle integration test")
+                        == expected_active =>
+                {
+                    return;
+                }
+                Ok(SessionEvent::Failed(error)) => panic!("logind monitor failed: {error}"),
+                Ok(_) | Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(10)),
+                Err(TryRecvError::Disconnected) => panic!("logind event channel closed"),
+            }
+        }
+
+        panic!("timed out waiting for systemd idle inhibitor state {expected_active}");
     }
 }

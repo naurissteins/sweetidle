@@ -15,7 +15,7 @@ use crate::{
     command::{FinishedCommand, ProcessCompletion, ProcessError, ProcessStart, SkipDecision},
     config::Config,
     listener::ListenerSet,
-    session::{DbusInhibitMonitor, LogindFeatures, LogindMonitor},
+    session::{DbusInhibitMonitor, LogindFeatures, LogindMonitor, SystemdIdleInhibitor},
     wayland::IdleWaylandConnection,
 };
 
@@ -43,9 +43,14 @@ pub enum RuntimeEvent {
         released_count: usize,
         active_count: usize,
     },
+    SystemdIdleInhibitorsChanged {
+        inhibitors: Vec<SystemdIdleInhibitor>,
+        active_count: usize,
+    },
     IdleSuppressed {
         listener_id: crate::listener::ListenerId,
         active_dbus_inhibitors: usize,
+        active_systemd_inhibitors: usize,
     },
     CommandStarted(ProcessStart),
     CommandSkipped(SkipDecision),
@@ -166,11 +171,13 @@ fn logind_features(config: &Config) -> Option<LogindFeatures> {
     let session_events =
         config.general.lock_command.is_some() || config.general.unlock_command.is_some();
     let sleep_events = has_before_sleep || has_after_resume;
+    let idle_inhibitors = !config.general.ignore_systemd_inhibit;
 
-    (sleep_events || session_events).then_some(LogindFeatures {
+    (sleep_events || session_events || idle_inhibitors).then_some(LogindFeatures {
         sleep_events,
         delay_inhibitor: has_before_sleep && config.general.wait_before_sleep,
         session_events,
+        idle_inhibitors,
     })
 }
 
@@ -192,6 +199,7 @@ mod tests {
                 sleep_events: true,
                 delay_inhibitor: false,
                 session_events: false,
+                idle_inhibitors: true,
             })
         );
     }
@@ -207,6 +215,7 @@ mod tests {
                 sleep_events: false,
                 delay_inhibitor: false,
                 session_events: true,
+                idle_inhibitors: true,
             })
         );
     }
@@ -222,13 +231,47 @@ mod tests {
                 sleep_events: false,
                 delay_inhibitor: false,
                 session_events: true,
+                idle_inhibitors: true,
             })
         );
     }
 
     #[test]
-    fn skips_logind_when_no_session_hooks_are_configured() {
-        assert_eq!(logind_features(&Config::default()), None);
+    fn starts_logind_for_systemd_idle_inhibitors_by_default() {
+        assert_eq!(
+            logind_features(&Config::default()),
+            Some(LogindFeatures {
+                sleep_events: false,
+                delay_inhibitor: false,
+                session_events: false,
+                idle_inhibitors: true,
+            })
+        );
+    }
+
+    #[test]
+    fn skips_logind_when_systemd_inhibitors_and_session_hooks_are_disabled() {
+        let mut config = Config::default();
+        config.general.ignore_systemd_inhibit = true;
+
+        assert_eq!(logind_features(&config), None);
+    }
+
+    #[test]
+    fn keeps_logind_hooks_when_systemd_inhibitors_are_disabled() {
+        let mut config = Config::default();
+        config.general.ignore_systemd_inhibit = true;
+        config.general.lock_command = Some("lock".to_string());
+
+        assert_eq!(
+            logind_features(&config),
+            Some(LogindFeatures {
+                sleep_events: false,
+                delay_inhibitor: false,
+                session_events: true,
+                idle_inhibitors: false,
+            })
+        );
     }
 
     #[test]
