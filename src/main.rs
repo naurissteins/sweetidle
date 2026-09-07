@@ -92,10 +92,16 @@ Options:
 
 fn check_config_file(path: Option<PathBuf>) -> Result<(), String> {
     let loaded = load_config(path)?;
-    println!(
-        "configuration ok: {} listener(s)",
-        loaded.config.listeners.len()
-    );
+    match loaded.config.idle_hint_timeout_seconds {
+        Some(timeout) => println!(
+            "configuration ok: {} listener(s), idlehint timeout: {timeout}s",
+            loaded.config.listeners.len()
+        ),
+        None => println!(
+            "configuration ok: {} listener(s), idlehint disabled",
+            loaded.config.listeners.len()
+        ),
+    }
     Ok(())
 }
 
@@ -107,6 +113,7 @@ fn run_daemon(path: Option<PathBuf>, verbose: bool) -> Result<(), String> {
     info!(
         config = %loaded.path.display(),
         listeners = loaded.config.listeners.len(),
+        idle_hint_timeout_seconds = ?loaded.config.idle_hint_timeout_seconds,
         "sweetsidle started"
     );
 
@@ -160,6 +167,10 @@ fn log_runtime_event(event: RuntimeEvent) -> bool {
         }
         RuntimeEvent::UnlockRequested => {
             info!("session unlock requested");
+            false
+        }
+        RuntimeEvent::IdleHintChanged { idle } => {
+            debug!(idle, "logind session idle hint changed");
             false
         }
         RuntimeEvent::DbusInhibitorAdded {

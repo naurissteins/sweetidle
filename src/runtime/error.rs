@@ -15,6 +15,7 @@ pub enum RuntimeError {
     Session(SessionError),
     RegisterSession(calloop::Error),
     SessionChannelClosed,
+    IdleHintMonitorMissing,
     DbusInhibit(DbusInhibitError),
     RegisterDbusInhibit(calloop::Error),
     DbusInhibitChannelClosed,
@@ -70,6 +71,9 @@ impl fmt::Display for RuntimeError {
                 )
             }
             Self::SessionChannelClosed => write!(formatter, "logind event channel closed"),
+            Self::IdleHintMonitorMissing => {
+                write!(formatter, "idle hint update has no active logind monitor")
+            }
             Self::DbusInhibit(source) => {
                 write!(formatter, "D-Bus idle inhibition failed: {source}")
             }
@@ -152,6 +156,7 @@ impl Error for RuntimeError {
             Self::MonitorProcess { source, .. } => Some(source),
             Self::Listener(_)
             | Self::SessionChannelClosed
+            | Self::IdleHintMonitorMissing
             | Self::DbusInhibitChannelClosed
             | Self::InvalidProcessId(_)
             | Self::ProcessNotReady(_) => None,

@@ -16,6 +16,8 @@ use crate::listener::{ListenerId, TimeoutRequest};
 pub enum IdleEvent {
     Idled(ListenerId),
     Resumed(ListenerId),
+    IdleHintIdled,
+    IdleHintResumed,
 }
 
 #[derive(Debug)]
@@ -26,21 +28,25 @@ pub struct IdleWaylandConnection {
 }
 
 impl IdleWaylandConnection {
-    pub fn connect(requests: &[TimeoutRequest]) -> Result<Self, IdleWaylandError> {
+    pub fn connect(
+        requests: &[TimeoutRequest],
+        idle_hint_timeout: Option<Duration>,
+    ) -> Result<Self, IdleWaylandError> {
         let connection = Connection::connect_to_env().map_err(IdleWaylandError::Connect)?;
         let (globals, event_queue) =
             registry_queue_init(&connection).map_err(IdleWaylandError::Globals)?;
         let queue_handle = event_queue.handle();
         let notifier = bind_idle_notifier(&globals, &queue_handle)?;
         let seat = bind_first_seat(&globals, &queue_handle)?;
-        let notifications = create_notifications(&notifier, &seat, &queue_handle, requests, 0)?;
+        let requests = notification_requests(requests, idle_hint_timeout);
+        let notifications = create_notifications(&notifier, &seat, &queue_handle, &requests, 0)?;
 
         connection.flush().map_err(IdleWaylandError::Flush)?;
 
         Ok(Self {
             connection,
             event_queue,
-            state: IdleWaylandState::new(notifier, seat, queue_handle, notifications),
+            state: IdleWaylandState::new(notifier, seat, queue_handle, requests, notifications),
         })
     }
 
@@ -80,6 +86,7 @@ pub enum IdleWaylandError {
         listener_id: ListenerId,
         timeout: Duration,
     },
+    IdleHintTimeoutTooLarge(Duration),
     Flush(wayland_client::backend::WaylandError),
     Dispatch(wayland_client::DispatchError),
 }
@@ -106,6 +113,11 @@ impl fmt::Display for IdleWaylandError {
                 listener_id.index(),
                 timeout.as_millis()
             ),
+            Self::IdleHintTimeoutTooLarge(timeout) => write!(
+                formatter,
+                "idlehint timeout of {} milliseconds exceeds the Wayland protocol limit",
+                timeout.as_millis()
+            ),
             Self::Flush(source) => {
                 write!(
                     formatter,
@@ -125,7 +137,9 @@ impl Error for IdleWaylandError {
             Self::Bind { source, .. } => Some(source),
             Self::Flush(source) => Some(source),
             Self::Dispatch(source) => Some(source),
-            Self::MissingGlobal(_) | Self::TimeoutTooLarge { .. } => None,
+            Self::MissingGlobal(_)
+            | Self::TimeoutTooLarge { .. }
+            | Self::IdleHintTimeoutTooLarge(_) => None,
         }
     }
 }
@@ -137,6 +151,7 @@ pub(crate) struct IdleWaylandState {
     notifier: Option<ExtIdleNotifierV1>,
     seat: Option<wl_seat::WlSeat>,
     queue_handle: Option<QueueHandle<Self>>,
+    requests: Vec<IdleNotificationRequest>,
     notifications: Vec<ExtIdleNotificationV1>,
 }
 
@@ -145,6 +160,7 @@ impl IdleWaylandState {
         notifier: ExtIdleNotifierV1,
         seat: wl_seat::WlSeat,
         queue_handle: QueueHandle<Self>,
+        requests: Vec<IdleNotificationRequest>,
         notifications: Vec<ExtIdleNotificationV1>,
     ) -> Self {
         Self {
@@ -153,6 +169,7 @@ impl IdleWaylandState {
             notifier: Some(notifier),
             seat: Some(seat),
             queue_handle: Some(queue_handle),
+            requests,
             notifications,
         }
     }
@@ -169,10 +186,7 @@ impl IdleWaylandState {
         generation == self.notification_generation
     }
 
-    pub(crate) fn reset_notifications(
-        &mut self,
-        requests: &[TimeoutRequest],
-    ) -> Result<(), IdleWaylandError> {
+    pub(crate) fn reset_notifications(&mut self) -> Result<(), IdleWaylandError> {
         self.notification_generation = self.notification_generation.wrapping_add(1);
         self.events.clear();
         for notification in self.notifications.drain(..) {
@@ -190,7 +204,7 @@ impl IdleWaylandState {
             notifier,
             seat,
             queue_handle,
-            requests,
+            &self.requests,
             self.notification_generation,
         )?;
 
@@ -241,7 +255,7 @@ fn create_notifications(
     notifier: &ExtIdleNotifierV1,
     seat: &wl_seat::WlSeat,
     queue_handle: &QueueHandle<IdleWaylandState>,
-    requests: &[TimeoutRequest],
+    requests: &[IdleNotificationRequest],
     generation: u64,
 ) -> Result<Vec<ExtIdleNotificationV1>, IdleWaylandError> {
     requests
@@ -253,7 +267,7 @@ fn create_notifications(
                 seat,
                 queue_handle,
                 IdleNotificationData {
-                    listener_id: request.listener_id,
+                    target: request.target,
                     generation,
                 },
             ))
@@ -261,11 +275,50 @@ fn create_notifications(
         .collect()
 }
 
-fn timeout_millis(request: &TimeoutRequest) -> Result<u32, IdleWaylandError> {
-    u32::try_from(request.timeout.as_millis()).map_err(|_| IdleWaylandError::TimeoutTooLarge {
-        listener_id: request.listener_id,
-        timeout: request.timeout,
+fn notification_requests(
+    listeners: &[TimeoutRequest],
+    idle_hint_timeout: Option<Duration>,
+) -> Vec<IdleNotificationRequest> {
+    let mut requests = listeners
+        .iter()
+        .map(|request| IdleNotificationRequest {
+            target: IdleNotificationTarget::Listener(request.listener_id),
+            timeout: request.timeout,
+        })
+        .collect::<Vec<_>>();
+
+    if let Some(timeout) = idle_hint_timeout {
+        requests.push(IdleNotificationRequest {
+            target: IdleNotificationTarget::IdleHint,
+            timeout,
+        });
+    }
+
+    requests
+}
+
+fn timeout_millis(request: &IdleNotificationRequest) -> Result<u32, IdleWaylandError> {
+    u32::try_from(request.timeout.as_millis()).map_err(|_| match request.target {
+        IdleNotificationTarget::Listener(listener_id) => IdleWaylandError::TimeoutTooLarge {
+            listener_id,
+            timeout: request.timeout,
+        },
+        IdleNotificationTarget::IdleHint => {
+            IdleWaylandError::IdleHintTimeoutTooLarge(request.timeout)
+        }
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleNotificationTarget {
+    Listener(ListenerId),
+    IdleHint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IdleNotificationRequest {
+    target: IdleNotificationTarget,
+    timeout: Duration,
 }
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for IdleWaylandState {
@@ -294,7 +347,7 @@ impl Dispatch<ExtIdleNotifierV1, ()> for IdleWaylandState {
 
 #[derive(Debug, Clone, Copy)]
 struct IdleNotificationData {
-    listener_id: ListenerId,
+    target: IdleNotificationTarget,
     generation: u64,
 }
 
@@ -312,12 +365,14 @@ impl Dispatch<ExtIdleNotificationV1, IdleNotificationData> for IdleWaylandState 
         }
 
         match event {
-            ext_idle_notification_v1::Event::Idled => {
-                state.record(IdleEvent::Idled(data.listener_id));
-            }
-            ext_idle_notification_v1::Event::Resumed => {
-                state.record(IdleEvent::Resumed(data.listener_id));
-            }
+            ext_idle_notification_v1::Event::Idled => state.record(match data.target {
+                IdleNotificationTarget::Listener(listener_id) => IdleEvent::Idled(listener_id),
+                IdleNotificationTarget::IdleHint => IdleEvent::IdleHintIdled,
+            }),
+            ext_idle_notification_v1::Event::Resumed => state.record(match data.target {
+                IdleNotificationTarget::Listener(listener_id) => IdleEvent::Resumed(listener_id),
+                IdleNotificationTarget::IdleHint => IdleEvent::IdleHintResumed,
+            }),
             _ => {}
         }
     }
@@ -329,18 +384,24 @@ delegate_noop!(IdleWaylandState: ignore wl_seat::WlSeat);
 mod tests {
     use std::time::Duration;
 
-    use super::{IdleEvent, IdleWaylandError, IdleWaylandState, timeout_millis};
+    use super::{
+        IdleEvent, IdleNotificationRequest, IdleNotificationTarget, IdleWaylandError,
+        IdleWaylandState, notification_requests, timeout_millis,
+    };
     use crate::listener::{ListenerId, TimeoutRequest};
 
     #[test]
     fn converts_listener_timeout_to_protocol_milliseconds() {
-        assert!(matches!(timeout_millis(&request(0, 300)), Ok(300_000)));
+        assert!(matches!(
+            timeout_millis(&notification_request(0, 300)),
+            Ok(300_000)
+        ));
     }
 
     #[test]
     fn rejects_listener_timeout_above_protocol_limit() {
-        let request = TimeoutRequest {
-            listener_id: ListenerId::from_index(3),
+        let request = IdleNotificationRequest {
+            target: IdleNotificationTarget::Listener(ListenerId::from_index(3)),
             timeout: Duration::from_millis(u64::from(u32::MAX) + 1),
         };
 
@@ -350,6 +411,35 @@ mod tests {
                 listener_id,
                 timeout
             }) if listener_id == ListenerId::from_index(3) && timeout == request.timeout
+        ));
+    }
+
+    #[test]
+    fn appends_idle_hint_after_listener_requests() {
+        let requests = notification_requests(&[request(0, 60)], Some(Duration::from_secs(300)));
+
+        assert_eq!(
+            requests,
+            vec![
+                notification_request(0, 60),
+                IdleNotificationRequest {
+                    target: IdleNotificationTarget::IdleHint,
+                    timeout: Duration::from_secs(300),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_idle_hint_timeout_overflow_separately() {
+        let request = IdleNotificationRequest {
+            target: IdleNotificationTarget::IdleHint,
+            timeout: Duration::from_millis(u64::from(u32::MAX) + 1),
+        };
+
+        assert!(matches!(
+            timeout_millis(&request),
+            Err(IdleWaylandError::IdleHintTimeoutTooLarge(timeout)) if timeout == request.timeout
         ));
     }
 
@@ -384,6 +474,16 @@ mod tests {
     fn request(listener_index: usize, timeout_seconds: u64) -> TimeoutRequest {
         TimeoutRequest {
             listener_id: ListenerId::from_index(listener_index),
+            timeout: Duration::from_secs(timeout_seconds),
+        }
+    }
+
+    fn notification_request(
+        listener_index: usize,
+        timeout_seconds: u64,
+    ) -> IdleNotificationRequest {
+        IdleNotificationRequest {
+            target: IdleNotificationTarget::Listener(ListenerId::from_index(listener_index)),
             timeout: Duration::from_secs(timeout_seconds),
         }
     }

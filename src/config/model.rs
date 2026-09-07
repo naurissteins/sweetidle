@@ -1,6 +1,7 @@
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Config {
     pub general: GeneralConfig,
+    pub idle_hint_timeout_seconds: Option<u64>,
     pub listeners: Vec<ListenerConfig>,
 }
 

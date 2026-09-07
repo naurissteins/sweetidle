@@ -28,6 +28,7 @@ impl Config {
 
     fn from_document(document: &KdlDocument) -> Result<Self, ConfigError> {
         let mut general = None;
+        let mut idle_hint_timeout_seconds = None;
         let mut listeners = Vec::new();
 
         for node in document.nodes() {
@@ -39,6 +40,13 @@ impl Config {
 
                     general = Some(parse_general(node)?);
                 }
+                "idlehint" => {
+                    if idle_hint_timeout_seconds.is_some() {
+                        return Err(ConfigError::DuplicateNode("idlehint".to_string()));
+                    }
+
+                    idle_hint_timeout_seconds = Some(parse_idle_hint(node)?);
+                }
                 "listener" => listeners.push(parse_listener(node)?),
                 name => return Err(ConfigError::UnknownTopLevel(name.to_string())),
             }
@@ -46,6 +54,7 @@ impl Config {
 
         Ok(Self {
             general: general.unwrap_or_default(),
+            idle_hint_timeout_seconds,
             listeners,
         })
     }
@@ -134,7 +143,7 @@ fn parse_general(node: &KdlNode) -> Result<GeneralConfig, ConfigError> {
 fn parse_listener(node: &KdlNode) -> Result<ListenerConfig, ConfigError> {
     ensure_only_property("listener", "timeout", node)?;
 
-    let timeout_seconds = required_timeout(node)?;
+    let timeout_seconds = required_timeout("listener", node)?;
     let mut on_timeout = None;
     let mut on_resume = None;
     let mut seen = SeenFields::default();
@@ -167,6 +176,18 @@ fn parse_listener(node: &KdlNode) -> Result<ListenerConfig, ConfigError> {
     })
 }
 
+fn parse_idle_hint(node: &KdlNode) -> Result<u64, ConfigError> {
+    ensure_only_property("idlehint", "timeout", node)?;
+    if let Some(child) = node.iter_children().next() {
+        return Err(ConfigError::UnknownField {
+            parent: "idlehint".to_string(),
+            field: child.name().value().to_string(),
+        });
+    }
+
+    required_timeout("idlehint", node)
+}
+
 fn ensure_no_entries(name: &str, node: &KdlNode) -> Result<(), ConfigError> {
     if node.entries().is_empty() {
         Ok(())
@@ -176,9 +197,16 @@ fn ensure_no_entries(name: &str, node: &KdlNode) -> Result<(), ConfigError> {
 }
 
 fn ensure_only_property(name: &str, property: &str, node: &KdlNode) -> Result<(), ConfigError> {
+    let mut found = false;
     for entry in node.entries() {
         match entry.name().map(|entry_name| entry_name.value()) {
-            Some(field) if field == property => {}
+            Some(field) if field == property && !found => found = true,
+            Some(field) if field == property => {
+                return Err(ConfigError::DuplicateField {
+                    parent: name.to_string(),
+                    field: property.to_string(),
+                });
+            }
             _ => return Err(ConfigError::UnexpectedEntries(name.to_string())),
         }
     }
@@ -186,17 +214,17 @@ fn ensure_only_property(name: &str, property: &str, node: &KdlNode) -> Result<()
     Ok(())
 }
 
-fn required_timeout(node: &KdlNode) -> Result<u64, ConfigError> {
+fn required_timeout(name: &str, node: &KdlNode) -> Result<u64, ConfigError> {
     let value = node
         .get("timeout")
         .ok_or_else(|| ConfigError::MissingField {
-            node: "listener".to_string(),
+            node: name.to_string(),
             field: "timeout".to_string(),
         })?;
 
     let Some(timeout) = value.as_integer() else {
         return Err(ConfigError::InvalidType {
-            field: "listener.timeout".to_string(),
+            field: format!("{name}.timeout"),
             expected: "a positive integer".to_string(),
         });
     };
@@ -205,7 +233,7 @@ fn required_timeout(node: &KdlNode) -> Result<u64, ConfigError> {
         .ok()
         .filter(|timeout| *timeout > 0)
         .ok_or_else(|| ConfigError::InvalidValue {
-            field: "listener.timeout".to_string(),
+            field: format!("{name}.timeout"),
             reason: "must be greater than zero".to_string(),
         })
 }
@@ -293,6 +321,8 @@ general {
   ignore-systemd-inhibit #true
 }
 
+idlehint timeout=300
+
 listener timeout=300 {
   on-timeout "sweetslock"
 }
@@ -315,6 +345,7 @@ listener timeout=600 {
         );
         assert!(config.general.wait_before_sleep);
         assert!(config.general.ignore_systemd_inhibit);
+        assert_eq!(config.idle_hint_timeout_seconds, Some(300));
         assert_eq!(config.listeners.len(), 2);
         assert_eq!(config.listeners[0].timeout_seconds, 300);
         assert_eq!(
@@ -360,6 +391,48 @@ listener timeout=600 {
             error,
             ConfigError::InvalidValue {
                 field: "listener.timeout".to_string(),
+                reason: "must be greater than zero".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_idle_hint_nodes() {
+        let error = match Config::parse("idlehint timeout=60\nidlehint timeout=120\n") {
+            Ok(config) => panic!("unexpected config: {config:?}"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error, ConfigError::DuplicateNode("idlehint".to_string()));
+    }
+
+    #[test]
+    fn rejects_duplicate_idle_hint_timeout_properties() {
+        let error = match Config::parse("idlehint timeout=60 timeout=120\n") {
+            Ok(config) => panic!("unexpected config: {config:?}"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            ConfigError::DuplicateField {
+                parent: "idlehint".to_string(),
+                field: "timeout".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_zero_idle_hint_timeout() {
+        let error = match Config::parse("idlehint timeout=0\n") {
+            Ok(config) => panic!("unexpected config: {config:?}"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            ConfigError::InvalidValue {
+                field: "idlehint.timeout".to_string(),
                 reason: "must be greater than zero".to_string()
             }
         );

@@ -33,6 +33,8 @@ pub(super) struct RuntimeState {
     dbus_inhibit_channel_closed: bool,
     active_dbus_inhibitors: usize,
     active_systemd_inhibitors: usize,
+    idle_hint_state: Option<bool>,
+    idle_hint_updates: Vec<bool>,
     preparing_for_sleep: bool,
     delay_inhibitors: HashMap<CommandId, Vec<DelayInhibitor>>,
     dispatcher: CommandDispatcher,
@@ -60,6 +62,8 @@ impl RuntimeState {
             dbus_inhibit_channel_closed: false,
             active_dbus_inhibitors: 0,
             active_systemd_inhibitors: 0,
+            idle_hint_state: config.idle_hint_timeout_seconds.map(|_| false),
+            idle_hint_updates: Vec::new(),
             preparing_for_sleep: false,
             delay_inhibitors: HashMap::new(),
             dispatcher: CommandDispatcher::default(),
@@ -142,6 +146,10 @@ impl RuntimeState {
 
     pub(super) fn take_runtime_events(&mut self) -> Vec<RuntimeEvent> {
         std::mem::take(&mut self.runtime_events)
+    }
+
+    pub(super) fn take_idle_hint_updates(&mut self) -> Vec<bool> {
+        std::mem::take(&mut self.idle_hint_updates)
     }
 
     pub(super) fn record_session_event(&mut self, event: SessionEvent) {
@@ -233,6 +241,7 @@ impl RuntimeState {
                 }
                 SessionEvent::Resumed => {
                     self.preparing_for_sleep = false;
+                    self.set_idle_hint(false);
                     self.runtime_events.push(RuntimeEvent::ResumedFromSleep);
                     if let Some(command) = self.after_resume_command.clone() {
                         self.session_command_intents.push(SessionCommandIntent {
@@ -253,6 +262,7 @@ impl RuntimeState {
                     }
                 }
                 SessionEvent::UnlockRequested => {
+                    self.set_idle_hint(false);
                     self.runtime_events.push(RuntimeEvent::UnlockRequested);
                     if let Some(command) = self.unlock_command.clone() {
                         self.session_command_intents.push(SessionCommandIntent {
@@ -288,6 +298,7 @@ impl RuntimeState {
         self.dbus_inhibit_events.clear();
         self.command_intents.clear();
         self.session_command_intents.clear();
+        self.idle_hint_updates.clear();
     }
 
     pub(super) fn request_shutdown(&mut self, signal: ShutdownSignal) {
@@ -326,6 +337,12 @@ impl RuntimeState {
             IdleEvent::Resumed(_) => {
                 self.command_intents.extend(self.listeners.mark_active());
             }
+            IdleEvent::IdleHintIdled => {
+                if !self.idle_inhibited() {
+                    self.set_idle_hint(true);
+                }
+            }
+            IdleEvent::IdleHintResumed => self.set_idle_hint(false),
         }
 
         Ok(())
@@ -361,13 +378,27 @@ impl RuntimeState {
             return Ok(());
         }
 
-        let requests = self.listeners.timeout_requests();
-        self.wayland.reset_notifications(&requests)?;
+        self.wayland.reset_notifications()?;
         if is_inhibited {
             self.command_intents.extend(self.listeners.mark_active());
+            self.set_idle_hint(false);
         }
 
         Ok(())
+    }
+
+    fn set_idle_hint(&mut self, idle: bool) {
+        let Some(current) = self.idle_hint_state.as_mut() else {
+            return;
+        };
+        if *current == idle {
+            return;
+        }
+
+        *current = idle;
+        self.idle_hint_updates.push(idle);
+        self.runtime_events
+            .push(RuntimeEvent::IdleHintChanged { idle });
     }
 
     fn dispatch_decision(
@@ -533,6 +564,70 @@ mod tests {
             Err(RuntimeError::Listener(ListenerError::UnknownListener(
                 listener_id
             ))) if listener_id == ListenerId::from_index(9)
+        ));
+    }
+
+    #[test]
+    fn reports_idle_hint_transitions_once() {
+        let mut state = idle_hint_runtime_state();
+
+        assert_runtime_ok(state.route_idle_event(IdleEvent::IdleHintIdled));
+        assert_runtime_ok(state.route_idle_event(IdleEvent::IdleHintIdled));
+
+        assert_eq!(state.take_idle_hint_updates(), vec![true]);
+        assert!(matches!(
+            state.take_runtime_events().as_slice(),
+            [RuntimeEvent::IdleHintChanged { idle: true }]
+        ));
+
+        assert_runtime_ok(state.route_idle_event(IdleEvent::IdleHintResumed));
+
+        assert_eq!(state.take_idle_hint_updates(), vec![false]);
+        assert!(matches!(
+            state.take_runtime_events().as_slice(),
+            [RuntimeEvent::IdleHintChanged { idle: false }]
+        ));
+    }
+
+    #[test]
+    fn inhibition_clears_an_active_idle_hint() {
+        let mut state = idle_hint_runtime_state();
+        assert_runtime_ok(state.route_idle_event(IdleEvent::IdleHintIdled));
+        state.take_idle_hint_updates();
+        state.take_runtime_events();
+        state.record_dbus_inhibit_event(DbusInhibitEvent::Added {
+            inhibitor: inhibitor_info(1),
+            active_count: 1,
+        });
+
+        assert_runtime_ok(state.route_dbus_inhibit_events());
+
+        assert_eq!(state.take_idle_hint_updates(), vec![false]);
+        assert!(
+            state
+                .take_runtime_events()
+                .iter()
+                .any(|event| matches!(event, RuntimeEvent::IdleHintChanged { idle: false }))
+        );
+    }
+
+    #[test]
+    fn unlock_clears_an_active_idle_hint() {
+        let mut state = idle_hint_runtime_state();
+        assert_runtime_ok(state.route_idle_event(IdleEvent::IdleHintIdled));
+        state.take_idle_hint_updates();
+        state.take_runtime_events();
+        state.record_session_event(SessionEvent::UnlockRequested);
+
+        assert_runtime_ok(state.route_session_events());
+
+        assert_eq!(state.take_idle_hint_updates(), vec![false]);
+        assert!(matches!(
+            state.take_runtime_events().as_slice(),
+            [
+                RuntimeEvent::IdleHintChanged { idle: false },
+                RuntimeEvent::UnlockRequested
+            ]
         ));
     }
 
@@ -885,6 +980,7 @@ mod tests {
     fn runtime_state() -> RuntimeState {
         let config = Config {
             general: GeneralConfig::default(),
+            idle_hint_timeout_seconds: None,
             listeners: vec![
                 ListenerConfig {
                     timeout_seconds: 300,
@@ -904,6 +1000,12 @@ mod tests {
             ListenerSet::from_config(&config),
             &config,
         )
+    }
+
+    fn idle_hint_runtime_state() -> RuntimeState {
+        let mut state = runtime_state();
+        state.idle_hint_state = Some(false);
+        state
     }
 
     fn intent(listener_index: usize, kind: CommandKind, command: &str) -> CommandIntent {
