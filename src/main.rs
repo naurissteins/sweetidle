@@ -179,13 +179,30 @@ fn log_runtime_event(event: RuntimeEvent) -> bool {
             );
             false
         }
+        RuntimeEvent::SystemdIdleInhibitorsChanged {
+            inhibitors,
+            active_count,
+        } => {
+            debug!(active_count, "systemd idle inhibitors changed");
+            for inhibitor in inhibitors {
+                debug!(
+                    who = inhibitor.who,
+                    why = inhibitor.why,
+                    uid = inhibitor.uid,
+                    pid = inhibitor.pid,
+                    "active systemd idle inhibitor"
+                );
+            }
+            false
+        }
         RuntimeEvent::IdleSuppressed {
             listener_id,
             active_dbus_inhibitors,
+            active_systemd_inhibitors,
         } => {
             debug!(
                 listener = listener_id.index(),
-                active_dbus_inhibitors, "idle action suppressed"
+                active_dbus_inhibitors, active_systemd_inhibitors, "idle action suppressed"
             );
             false
         }
