@@ -7,7 +7,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use async_channel::{Receiver, Sender as ShutdownSender, bounded};
+use async_channel::{Receiver, Sender, bounded, unbounded};
 use calloop::channel::{Channel, Sender as EventSender, channel};
 use futures_lite::{StreamExt, future};
 use zbus::{
@@ -48,6 +48,8 @@ trait LogindManager {
     gen_blocking = false
 )]
 trait LogindSession {
+    fn set_idle_hint(&self, idle: bool) -> zbus::Result<()>;
+
     #[zbus(signal)]
     fn lock(&self) -> zbus::Result<()>;
 
@@ -82,10 +84,12 @@ pub(crate) struct LogindFeatures {
     pub(crate) delay_inhibitor: bool,
     pub(crate) session_events: bool,
     pub(crate) idle_inhibitors: bool,
+    pub(crate) idle_hint: bool,
 }
 
 pub(crate) struct LogindMonitor {
-    shutdown: Option<ShutdownSender<()>>,
+    requests: Option<Sender<SessionRequest>>,
+    shutdown: Option<Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -105,6 +109,8 @@ pub enum SessionError {
     QueryState(zbus::Error),
     QueryInhibitors(zbus::Error),
     Inhibit(zbus::Error),
+    SetIdleHint(zbus::Error),
+    RequestChannelClosed,
     DecodeSignal(zbus::Error),
     Disconnected,
 }
@@ -116,9 +122,18 @@ impl LogindMonitor {
         let (event_sender, event_channel) = channel();
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let (shutdown_sender, shutdown_receiver) = bounded(1);
+        let (request_sender, request_receiver) = unbounded();
         let thread = thread::Builder::new()
             .name("sweetsidle-logind".to_string())
-            .spawn(move || run_worker(features, event_sender, ready_sender, shutdown_receiver))
+            .spawn(move || {
+                run_worker(
+                    features,
+                    event_sender,
+                    ready_sender,
+                    request_receiver,
+                    shutdown_receiver,
+                );
+            })
             .map_err(SessionError::SpawnWorker)?;
         match ready_receiver.recv() {
             Ok(Ok(())) => {}
@@ -134,11 +149,20 @@ impl LogindMonitor {
 
         Ok((
             Self {
+                requests: Some(request_sender),
                 shutdown: Some(shutdown_sender),
                 thread: Some(thread),
             },
             event_channel,
         ))
+    }
+
+    pub(crate) fn set_idle_hint(&self, idle: bool) -> Result<(), SessionError> {
+        self.requests
+            .as_ref()
+            .ok_or(SessionError::RequestChannelClosed)?
+            .try_send(SessionRequest::SetIdleHint(idle))
+            .map_err(|_| SessionError::RequestChannelClosed)
     }
 }
 
@@ -147,6 +171,7 @@ impl Drop for LogindMonitor {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.try_send(());
         }
+        self.requests.take();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -209,6 +234,13 @@ impl fmt::Display for SessionError {
                     "failed to acquire logind sleep delay inhibitor: {source}"
                 )
             }
+            Self::SetIdleHint(source) => {
+                write!(
+                    formatter,
+                    "failed to update logind session idle hint: {source}"
+                )
+            }
+            Self::RequestChannelClosed => write!(formatter, "logind request channel closed"),
             Self::DecodeSignal(source) => {
                 write!(formatter, "invalid PrepareForSleep signal: {source}")
             }
@@ -229,9 +261,12 @@ impl Error for SessionError {
             | Self::QueryState(source)
             | Self::QueryInhibitors(source)
             | Self::Inhibit(source)
+            | Self::SetIdleHint(source)
             | Self::DecodeSignal(source) => Some(source),
             Self::ResolveSession { by_process_id, .. } => Some(by_process_id.as_ref()),
-            Self::WorkerInitializationStopped | Self::Disconnected => None,
+            Self::WorkerInitializationStopped | Self::RequestChannelClosed | Self::Disconnected => {
+                None
+            }
         }
     }
 }
@@ -240,9 +275,12 @@ fn run_worker(
     features: LogindFeatures,
     events: EventSender<SessionEvent>,
     ready: SyncSender<Result<(), SessionError>>,
+    requests: Receiver<SessionRequest>,
     shutdown: Receiver<()>,
 ) {
-    if let Err(error) = async_io::block_on(worker_loop(features, &events, &ready, shutdown)) {
+    if let Err(error) =
+        async_io::block_on(worker_loop(features, &events, &ready, requests, shutdown))
+    {
         let _ = events.send(SessionEvent::Failed(error));
     }
 }
@@ -251,6 +289,7 @@ async fn worker_loop(
     features: LogindFeatures,
     events: &EventSender<SessionEvent>,
     ready: &SyncSender<Result<(), SessionError>>,
+    requests: Receiver<SessionRequest>,
     shutdown: Receiver<()>,
 ) -> Result<(), SessionError> {
     let connection = match Connection::system().await {
@@ -273,7 +312,7 @@ async fn worker_loop(
     } else {
         None
     };
-    let session_proxy = if features.session_events {
+    let session_proxy = if features.session_events || features.idle_hint {
         let path = match resolve_session_path(&proxy).await {
             Ok(path) => path,
             Err(error) => return report_initialization_error(ready, error),
@@ -299,23 +338,23 @@ async fn worker_loop(
     } else {
         None
     };
-    let mut lock_signals = match session_proxy.as_ref() {
-        Some(proxy) => match proxy.receive_lock().await {
+    let mut lock_signals = match (features.session_events, session_proxy.as_ref()) {
+        (true, Some(proxy)) => match proxy.receive_lock().await {
             Ok(signals) => Some(signals),
             Err(source) => {
                 return report_initialization_error(ready, SessionError::SubscribeSession(source));
             }
         },
-        None => None,
+        (false, _) | (true, None) => None,
     };
-    let mut unlock_signals = match session_proxy.as_ref() {
-        Some(proxy) => match proxy.receive_unlock().await {
+    let mut unlock_signals = match (features.session_events, session_proxy.as_ref()) {
+        (true, Some(proxy)) => match proxy.receive_unlock().await {
             Ok(signals) => Some(signals),
             Err(source) => {
                 return report_initialization_error(ready, SessionError::SubscribeSession(source));
             }
         },
-        None => None,
+        (false, _) | (true, None) => None,
     };
     let mut idle_inhibitor_changes = if features.idle_inhibitors {
         Some(proxy.receive_block_inhibited_changed().await)
@@ -348,6 +387,11 @@ async fn worker_loop(
     } else {
         false
     };
+    if features.idle_hint
+        && let Err(error) = set_idle_hint(session_proxy.as_ref(), false).await
+    {
+        return report_initialization_error(ready, error);
+    }
 
     if !idle_inhibitors.is_empty()
         && events
@@ -410,10 +454,18 @@ async fn worker_loop(
                         }
                     },
                 ),
-                async {
-                    let _ = shutdown.recv().await;
-                    WorkerInput::Shutdown
-                },
+                future::race(
+                    async {
+                        match requests.recv().await {
+                            Ok(request) => WorkerInput::Request(request),
+                            Err(_) => WorkerInput::Shutdown,
+                        }
+                    },
+                    async {
+                        let _ = shutdown.recv().await;
+                        WorkerInput::Shutdown
+                    },
+                ),
             ),
         )
         .await;
@@ -466,7 +518,15 @@ async fn worker_loop(
                     }
                 }
             }
-            WorkerInput::Shutdown => return Ok(()),
+            WorkerInput::Request(SessionRequest::SetIdleHint(idle)) => {
+                set_idle_hint(session_proxy.as_ref(), idle).await?;
+            }
+            WorkerInput::Shutdown => {
+                if features.idle_hint {
+                    set_idle_hint(session_proxy.as_ref(), false).await?;
+                }
+                return Ok(());
+            }
         }
     }
 }
@@ -509,6 +569,20 @@ async fn acquire_delay_inhibitor(
         .map_err(SessionError::Inhibit)
 }
 
+async fn set_idle_hint(
+    proxy: Option<&LogindSessionProxy<'_>>,
+    idle: bool,
+) -> Result<(), SessionError> {
+    let Some(proxy) = proxy else {
+        return Err(SessionError::RequestChannelClosed);
+    };
+
+    proxy
+        .set_idle_hint(idle)
+        .await
+        .map_err(SessionError::SetIdleHint)
+}
+
 async fn query_idle_inhibitors(
     proxy: &LogindManagerProxy<'_>,
 ) -> Result<Vec<SystemdIdleInhibitor>, SessionError> {
@@ -532,7 +606,13 @@ enum WorkerInput {
     Lock(bool),
     Unlock(bool),
     IdleInhibitorsChanged(bool),
+    Request(SessionRequest),
     Shutdown,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SessionRequest {
+    SetIdleHint(bool),
 }
 
 #[cfg(test)]
@@ -549,6 +629,7 @@ mod tests {
             delay_inhibitor: true,
             session_events: true,
             idle_inhibitors: true,
+            idle_hint: true,
         }) {
             Ok(parts) => parts,
             Err(error) => panic!("failed to initialize logind monitor: {error}"),
@@ -565,6 +646,7 @@ mod tests {
             delay_inhibitor: false,
             session_events: false,
             idle_inhibitors: true,
+            idle_hint: false,
         }) {
             Ok(parts) => parts,
             Err(error) => panic!("failed to initialize logind monitor: {error}"),

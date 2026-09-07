@@ -212,6 +212,7 @@ mod tests {
     fn listener_without_timeout_command_still_tracks_resume() {
         let config = Config {
             general: GeneralConfig::default(),
+            idle_hint_timeout_seconds: None,
             listeners: vec![ListenerConfig {
                 timeout_seconds: 5,
                 on_timeout: None,
@@ -244,6 +245,7 @@ mod tests {
     fn sample_config() -> Config {
         Config {
             general: GeneralConfig::default(),
+            idle_hint_timeout_seconds: None,
             listeners: vec![
                 ListenerConfig {
                     timeout_seconds: 300,

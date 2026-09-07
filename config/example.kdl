@@ -9,6 +9,9 @@ general {
   ignore-systemd-inhibit #false
 }
 
+// Report the session as idle to logind after five minutes.
+idlehint timeout=300
+
 listener timeout=300 {
   on-timeout "sweetslock"
 }

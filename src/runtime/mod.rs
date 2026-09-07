@@ -26,6 +26,9 @@ pub enum RuntimeEvent {
     ResumedFromSleep,
     LockRequested,
     UnlockRequested,
+    IdleHintChanged {
+        idle: bool,
+    },
     DbusInhibitorAdded {
         cookie: u32,
         application: String,
@@ -67,14 +70,16 @@ pub enum RuntimeEvent {
 pub struct IdleRuntime {
     event_loop: EventLoop<'static, RuntimeState>,
     state: RuntimeState,
-    _logind: Option<LogindMonitor>,
+    logind: Option<LogindMonitor>,
     _dbus_inhibit: Option<DbusInhibitMonitor>,
 }
 
 impl IdleRuntime {
     pub fn connect(config: &Config) -> Result<Self, RuntimeError> {
         let listeners = ListenerSet::from_config(config);
-        let wayland = IdleWaylandConnection::connect(&listeners.timeout_requests())?;
+        let idle_hint_timeout = config.idle_hint_timeout_seconds.map(Duration::from_secs);
+        let wayland =
+            IdleWaylandConnection::connect(&listeners.timeout_requests(), idle_hint_timeout)?;
         let parts = wayland.into_parts();
         let event_loop = EventLoop::try_new().map_err(RuntimeError::CreateEventLoop)?;
         let source = WaylandSource::new(parts.connection, parts.event_queue);
@@ -92,7 +97,7 @@ impl IdleRuntime {
         Ok(Self {
             event_loop,
             state: RuntimeState::new(parts.state, listeners, config),
-            _logind: logind,
+            logind,
             _dbus_inhibit: dbus_inhibit,
         })
     }
@@ -114,6 +119,12 @@ impl IdleRuntime {
         self.state.route_dbus_inhibit_events()?;
         self.state.route_session_events()?;
         self.state.route_wayland_events()?;
+        for idle in self.state.take_idle_hint_updates() {
+            self.logind
+                .as_ref()
+                .ok_or(RuntimeError::IdleHintMonitorMissing)?
+                .set_idle_hint(idle)?;
+        }
         self.state
             .dispatch_command_intents(&self.event_loop.handle())?;
 
@@ -172,12 +183,14 @@ fn logind_features(config: &Config) -> Option<LogindFeatures> {
         config.general.lock_command.is_some() || config.general.unlock_command.is_some();
     let sleep_events = has_before_sleep || has_after_resume;
     let idle_inhibitors = !config.general.ignore_systemd_inhibit;
+    let idle_hint = config.idle_hint_timeout_seconds.is_some();
 
-    (sleep_events || session_events || idle_inhibitors).then_some(LogindFeatures {
+    (sleep_events || session_events || idle_inhibitors || idle_hint).then_some(LogindFeatures {
         sleep_events,
         delay_inhibitor: has_before_sleep && config.general.wait_before_sleep,
         session_events,
         idle_inhibitors,
+        idle_hint,
     })
 }
 
@@ -200,6 +213,7 @@ mod tests {
                 delay_inhibitor: false,
                 session_events: false,
                 idle_inhibitors: true,
+                idle_hint: false,
             })
         );
     }
@@ -216,6 +230,7 @@ mod tests {
                 delay_inhibitor: false,
                 session_events: true,
                 idle_inhibitors: true,
+                idle_hint: false,
             })
         );
     }
@@ -232,6 +247,7 @@ mod tests {
                 delay_inhibitor: false,
                 session_events: true,
                 idle_inhibitors: true,
+                idle_hint: false,
             })
         );
     }
@@ -245,6 +261,7 @@ mod tests {
                 delay_inhibitor: false,
                 session_events: false,
                 idle_inhibitors: true,
+                idle_hint: false,
             })
         );
     }
@@ -270,6 +287,27 @@ mod tests {
                 delay_inhibitor: false,
                 session_events: true,
                 idle_inhibitors: false,
+                idle_hint: false,
+            })
+        );
+    }
+
+    #[test]
+    fn starts_logind_for_idle_hint_when_inhibitor_monitoring_is_disabled() {
+        let mut config = Config {
+            idle_hint_timeout_seconds: Some(300),
+            ..Config::default()
+        };
+        config.general.ignore_systemd_inhibit = true;
+
+        assert_eq!(
+            logind_features(&config),
+            Some(LogindFeatures {
+                sleep_events: false,
+                delay_inhibitor: false,
+                session_events: false,
+                idle_inhibitors: false,
+                idle_hint: true,
             })
         );
     }
