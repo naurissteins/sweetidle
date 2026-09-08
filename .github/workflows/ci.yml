@@ -61,6 +61,21 @@ jobs:
           sudo apt-get install -y libsystemd-dev libwayland-dev pkg-config
       - run: cargo test
 
+  reload-integration:
+    name: Reload Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsystemd-dev libwayland-dev pkg-config
+      - name: Test configuration reload
+        run: cargo test --locked --test reload -- --ignored --test-threads=1
+
   dependencies:
     name: Dependencies
     runs-on: ubuntu-latest
