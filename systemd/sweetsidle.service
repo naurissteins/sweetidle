@@ -1,0 +1,18 @@
+[Unit]
+Description=Sweets idle management daemon
+Documentation=https://github.com/naurissteins/sweetsidle
+PartOf=graphical-session.target
+After=graphical-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+
+[Service]
+Type=exec
+ExecStart=sweetsidle
+ExecReload=kill -HUP $MAINPID
+KillMode=process
+Restart=on-failure
+RestartSec=1s
+TimeoutStopSec=5s
+
+[Install]
+WantedBy=graphical-session.target
