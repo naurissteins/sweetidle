@@ -62,7 +62,7 @@ mod tests {
 
     #[test]
     fn load_reads_and_parses_a_valid_file() {
-        let file = TestConfigFile::new("listener timeout=30\n");
+        let file = TestConfigFile::new("[[listener]]\ntimeout = 30\n");
 
         let config = match Config::load(file.path()) {
             Ok(config) => config,
@@ -74,7 +74,7 @@ mod tests {
 
     #[test]
     fn load_reports_invalid_file_without_producing_a_config() {
-        let file = TestConfigFile::new("listener timeout=0\n");
+        let file = TestConfigFile::new("[[listener]]\ntimeout = 0\n");
 
         let error = match Config::load(file.path()) {
             Ok(config) => panic!("unexpected config: {config:?}"),
@@ -92,7 +92,7 @@ mod tests {
         fn new(source: &str) -> Self {
             let id = NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "sweetsidle-config-test-{}-{id}.kdl",
+                "sweetsidle-config-test-{}-{id}.toml",
                 std::process::id()
             ));
             if let Err(error) = fs::write(&path, source) {

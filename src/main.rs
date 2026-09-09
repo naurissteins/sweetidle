@@ -94,11 +94,11 @@ fn check_config_file(path: Option<PathBuf>) -> Result<(), String> {
     let loaded = load_config(path)?;
     match loaded.config.idle_hint_timeout_seconds {
         Some(timeout) => println!(
-            "configuration ok: {} listener(s), idlehint timeout: {timeout}s",
+            "configuration ok: {} listener(s), idle hint timeout: {timeout}s",
             loaded.config.listeners.len()
         ),
         None => println!(
-            "configuration ok: {} listener(s), idlehint disabled",
+            "configuration ok: {} listener(s), idle hint disabled",
             loaded.config.listeners.len()
         ),
     }
@@ -359,7 +359,7 @@ fn default_config_path() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME")
         .ok_or_else(|| "HOME is not set; pass --config <PATH>".to_string())?;
 
-    Ok(PathBuf::from(home).join(".config/sweetsidle/config.kdl"))
+    Ok(PathBuf::from(home).join(".config/sweetsidle/config.toml"))
 }
 
 #[cfg(test)]
@@ -382,9 +382,9 @@ mod tests {
     #[test]
     fn config_path_selects_daemon_startup() {
         assert_eq!(
-            parse_args(["--config".to_string(), "idle.kdl".to_string()]),
+            parse_args(["--config".to_string(), "idle.toml".to_string()]),
             Ok(Action::Run {
-                path: Some(PathBuf::from("idle.kdl")),
+                path: Some(PathBuf::from("idle.toml")),
                 verbose: false,
             })
         );
@@ -415,9 +415,9 @@ mod tests {
             parse_args([
                 "--check-config".to_string(),
                 "--config".to_string(),
-                "idle.kdl".to_string(),
+                "idle.toml".to_string(),
             ]),
-            Ok(Action::CheckConfig(Some(PathBuf::from("idle.kdl"))))
+            Ok(Action::CheckConfig(Some(PathBuf::from("idle.toml"))))
         );
     }
 }

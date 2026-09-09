@@ -115,7 +115,7 @@ impl fmt::Display for IdleWaylandError {
             ),
             Self::IdleHintTimeoutTooLarge(timeout) => write!(
                 formatter,
-                "idlehint timeout of {} milliseconds exceeds the Wayland protocol limit",
+                "idle hint timeout of {} milliseconds exceeds the Wayland protocol limit",
                 timeout.as_millis()
             ),
             Self::Flush(source) => {

@@ -44,7 +44,7 @@ fn invalid_sighup_keeps_the_last_valid_config_active() -> Result<(), Box<dyn Err
     let mut harness = ReloadHarness::start("active")?;
     harness.wait_for_markers(1)?;
 
-    fs::write(&harness.config_path, "listener timeout=0")?;
+    fs::write(&harness.config_path, "[[listener]]\ntimeout = 0\n")?;
     harness.signal_reload()?;
     harness.wait_for_log("configuration reload rejected")?;
     harness.compositor.pulse()?;
@@ -67,7 +67,7 @@ struct ReloadHarness {
 impl ReloadHarness {
     fn start(initial_marker: &str) -> Result<Self, Box<dyn Error>> {
         let temp_dir = tempfile::tempdir()?;
-        let config_path = temp_dir.path().join("config.kdl");
+        let config_path = temp_dir.path().join("config.toml");
         let marker_path = temp_dir.path().join("commands.log");
         let log_path = temp_dir.path().join("daemon.log");
         let socket_path = temp_dir.path().join("wayland-test");
@@ -136,8 +136,9 @@ fn write_config(
 ) -> Result<(), Box<dyn Error>> {
     let marker_path = shell_quote(path_text(marker_path)?);
     let command = format!("printf '%s\\n' {marker} >> {marker_path}");
+    let command = command.replace('\\', "\\\\").replace('"', "\\\"");
     let config = format!(
-        "general {{\n  ignore-dbus-inhibit #true\n  ignore-systemd-inhibit #true\n}}\n\nlistener timeout=3600 {{\n  on-timeout \"{command}\"\n}}\n"
+        "[general]\nignore_dbus_inhibit = true\nignore_systemd_inhibit = true\n\n[[listener]]\ntimeout = 3600\non_timeout = \"{command}\"\n"
     );
     fs::write(config_path, config)?;
     Ok(())
