@@ -904,7 +904,7 @@ mod tests {
         let mut state = runtime_state();
         state.reload_pending = true;
         let error = match Config::load(std::path::Path::new(
-            "/definitely-missing-sweetsidle-config.kdl",
+            "/definitely-missing-sweetsidle-config.toml",
         )) {
             Ok(config) => panic!("unexpected config: {config:?}"),
             Err(error) => error,

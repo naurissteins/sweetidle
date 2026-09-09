@@ -101,7 +101,7 @@ mod tests {
 
     #[test]
     fn request_loads_config_on_the_worker() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config/example.kdl");
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config/example.toml");
         let (monitor, requester, events) = match ConfigReloadMonitor::connect(path) {
             Ok(parts) => parts,
             Err(error) => panic!("failed to start reload monitor: {error}"),

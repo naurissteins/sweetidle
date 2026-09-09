@@ -1,0 +1,25 @@
+# sweetsidle configuration
+# Place this file at ~/.config/sweetsidle/config.toml.
+
+[general]
+lock_command = "sweetslock"
+# Set this when the locker exposes a safe external unlock command.
+# unlock_command = "your-locker-control unlock"
+before_sleep_command = "sweetslock --daemonize"
+after_resume_command = "sweetsmsg output '*' power on"
+wait_before_sleep = true
+ignore_dbus_inhibit = false
+ignore_systemd_inhibit = false
+
+# Report the session as idle to logind after five minutes.
+[idle_hint]
+timeout = 300
+
+[[listener]]
+timeout = 300
+on_timeout = "sweetslock"
+
+[[listener]]
+timeout = 600
+on_timeout = "sweetsmsg output '*' power off"
+on_resume = "sweetsmsg output '*' power on"
