@@ -17,7 +17,7 @@ use crate::{
         ProcessStart, SkipReason,
     },
     config::Config,
-    listener::{CommandIntent, ListenerSet},
+    listener::{CommandIntent, InhibitPolicy, ListenerSet},
     session::{DbusInhibitEvent, DelayInhibitor, SessionEvent},
     wayland::{IdleEvent, IdleWaylandState},
 };
@@ -406,7 +406,11 @@ impl RuntimeState {
     fn route_idle_event(&mut self, event: IdleEvent) -> Result<(), RuntimeError> {
         match event {
             IdleEvent::Idled(listener_id) => {
-                if self.idle_inhibited() {
+                let inhibit_policy = self
+                    .listeners
+                    .inhibit_policy(listener_id)
+                    .map_err(RuntimeError::Listener)?;
+                if self.idle_inhibited() && inhibit_policy == InhibitPolicy::Respect {
                     self.runtime_events.push(RuntimeEvent::IdleSuppressed {
                         listener_id,
                         active_dbus_inhibitors: self.active_dbus_inhibitors,
@@ -466,9 +470,10 @@ impl RuntimeState {
             return Ok(());
         }
 
-        self.wayland.reset_notifications()?;
+        self.wayland.reset_inhibited_notifications()?;
         if is_inhibited {
-            self.command_intents.extend(self.listeners.mark_active());
+            self.command_intents
+                .extend(self.listeners.mark_active_respecting_inhibitors());
             self.set_idle_hint(false);
         }
 
@@ -653,6 +658,7 @@ mod tests {
                 timeout_seconds: 45,
                 on_timeout: Some("new lock".to_string()),
                 on_resume: None,
+                ignore_inhibit: false,
             }],
         };
 
@@ -800,6 +806,47 @@ mod tests {
                 active_systemd_inhibitors: 1,
             }] if *listener_id == ListenerId::from_index(0)
         ));
+    }
+
+    #[test]
+    fn opted_out_listener_runs_while_inhibited() {
+        let mut state = runtime_state_with_ignored_listener();
+        state.record_dbus_inhibit_event(DbusInhibitEvent::Added {
+            inhibitor: inhibitor_info(1),
+            active_count: 1,
+        });
+        assert_runtime_ok(state.route_dbus_inhibit_events());
+        state.take_runtime_events();
+
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(0))));
+
+        assert_eq!(
+            state.command_intents,
+            vec![intent(0, CommandKind::Timeout, "lock")]
+        );
+        assert!(state.take_runtime_events().is_empty());
+    }
+
+    #[test]
+    fn starting_inhibition_preserves_opted_out_listener_state() {
+        let mut state = runtime_state_with_ignored_listener();
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(0))));
+        state.command_intents.clear();
+        state.record_dbus_inhibit_event(DbusInhibitEvent::Added {
+            inhibitor: inhibitor_info(1),
+            active_count: 1,
+        });
+
+        assert_runtime_ok(state.route_dbus_inhibit_events());
+        assert!(state.command_intents.is_empty());
+
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(0))));
+        assert!(state.command_intents.is_empty());
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Resumed(ListenerId::from_index(0))));
+        assert_eq!(
+            state.command_intents,
+            vec![intent(0, CommandKind::Resume, "unlock")]
+        );
     }
 
     #[test]
@@ -1133,13 +1180,35 @@ mod tests {
                     timeout_seconds: 300,
                     on_timeout: Some("lock".to_string()),
                     on_resume: None,
+                    ignore_inhibit: false,
                 },
                 ListenerConfig {
                     timeout_seconds: 600,
                     on_timeout: Some("outputs off".to_string()),
                     on_resume: Some("outputs on".to_string()),
+                    ignore_inhibit: false,
                 },
             ],
+        };
+
+        RuntimeState::new(
+            IdleWaylandState::default(),
+            ListenerSet::from_config(&config),
+            &config,
+            None,
+        )
+    }
+
+    fn runtime_state_with_ignored_listener() -> RuntimeState {
+        let config = Config {
+            general: GeneralConfig::default(),
+            idle_hint_timeout_seconds: None,
+            listeners: vec![ListenerConfig {
+                timeout_seconds: 300,
+                on_timeout: Some("lock".to_string()),
+                on_resume: Some("unlock".to_string()),
+                ignore_inhibit: true,
+            }],
         };
 
         RuntimeState::new(

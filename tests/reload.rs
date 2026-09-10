@@ -138,7 +138,7 @@ fn write_config(
     let command = format!("printf '%s\\n' {marker} >> {marker_path}");
     let command = command.replace('\\', "\\\\").replace('"', "\\\"");
     let config = format!(
-        "[general]\nignore_dbus_inhibit = true\nignore_systemd_inhibit = true\n\n[[listener]]\ntimeout = 3600\non_timeout = \"{command}\"\n"
+        "[general]\nignore_dbus_inhibit = true\nignore_systemd_inhibit = true\n\n[[listener]]\ntimeout = 3600\non_timeout = \"{command}\"\nignore_inhibit = true\n"
     );
     fs::write(config_path, config)?;
     Ok(())
@@ -379,11 +379,14 @@ impl Dispatch<ExtIdleNotifierV1, ()> for MockState {
         _handle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
-        if let ext_idle_notifier_v1::Request::GetIdleNotification { id, .. } = request {
-            let notification = data_init.init(id, ());
-            notification.idled();
-            state.notifications.push(notification);
-        }
+        let id = match request {
+            ext_idle_notifier_v1::Request::GetIdleNotification { id, .. }
+            | ext_idle_notifier_v1::Request::GetInputIdleNotification { id, .. } => id,
+            _ => return,
+        };
+        let notification = data_init.init(id, ());
+        notification.idled();
+        state.notifications.push(notification);
     }
 }
 

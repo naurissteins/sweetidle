@@ -98,6 +98,8 @@ struct ListenerDocument {
     timeout: Option<i64>,
     on_timeout: Option<String>,
     on_resume: Option<String>,
+    #[serde(default)]
+    ignore_inhibit: bool,
 }
 
 fn parse_general(document: GeneralDocument) -> Result<GeneralConfig, ConfigError> {
@@ -125,6 +127,7 @@ fn parse_listener(index: usize, document: ListenerDocument) -> Result<ListenerCo
         timeout_seconds: required_timeout(&table, document.timeout)?,
         on_timeout: optional_command(&format!("{table}.on_timeout"), document.on_timeout)?,
         on_resume: optional_command(&format!("{table}.on_resume"), document.on_resume)?,
+        ignore_inhibit: document.ignore_inhibit,
     })
 }
 
@@ -181,6 +184,7 @@ timeout = 300
 [[listener]]
 timeout = 300
 on_timeout = "sweetslock"
+ignore_inhibit = true
 
 [[listener]]
 timeout = 600
@@ -200,6 +204,8 @@ on_resume = "sweetsmsg output '*' power on"
         assert_eq!(config.idle_hint_timeout_seconds, Some(300));
         assert_eq!(config.listeners.len(), 2);
         assert_eq!(config.listeners[0].timeout_seconds, 300);
+        assert!(config.listeners[0].ignore_inhibit);
+        assert!(!config.listeners[1].ignore_inhibit);
         assert_eq!(
             config.listeners[1].on_resume.as_deref(),
             Some("sweetsmsg output '*' power on")

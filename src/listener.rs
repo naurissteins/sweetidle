@@ -19,6 +19,13 @@ impl ListenerId {
 pub struct TimeoutRequest {
     pub listener_id: ListenerId,
     pub timeout: Duration,
+    pub inhibit_policy: InhibitPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InhibitPolicy {
+    Respect,
+    Ignore,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +60,11 @@ impl ListenerSet {
                 timeout: Duration::from_secs(listener.timeout_seconds),
                 on_timeout: listener.on_timeout.clone(),
                 on_resume: listener.on_resume.clone(),
+                inhibit_policy: if listener.ignore_inhibit {
+                    InhibitPolicy::Ignore
+                } else {
+                    InhibitPolicy::Respect
+                },
                 phase: ListenerPhase::Armed,
             })
             .collect();
@@ -67,6 +79,7 @@ impl ListenerSet {
             .map(|(index, listener)| TimeoutRequest {
                 listener_id: ListenerId(index),
                 timeout: listener.timeout,
+                inhibit_policy: listener.inhibit_policy,
             })
             .collect()
     }
@@ -94,10 +107,28 @@ impl ListenerSet {
     }
 
     pub fn mark_active(&mut self) -> Vec<CommandIntent> {
+        self.mark_active_matching(|_| true)
+    }
+
+    pub fn mark_active_respecting_inhibitors(&mut self) -> Vec<CommandIntent> {
+        self.mark_active_matching(|listener| listener.inhibit_policy == InhibitPolicy::Respect)
+    }
+
+    pub fn inhibit_policy(&self, listener_id: ListenerId) -> Result<InhibitPolicy, ListenerError> {
+        self.listeners
+            .get(listener_id.index())
+            .map(|listener| listener.inhibit_policy)
+            .ok_or(ListenerError::UnknownListener(listener_id))
+    }
+
+    fn mark_active_matching(
+        &mut self,
+        mut matches: impl FnMut(&ListenerState) -> bool,
+    ) -> Vec<CommandIntent> {
         let mut intents = Vec::new();
 
         for (index, listener) in self.listeners.iter_mut().enumerate() {
-            if listener.phase == ListenerPhase::Armed {
+            if listener.phase == ListenerPhase::Armed || !matches(listener) {
                 continue;
             }
 
@@ -129,6 +160,7 @@ struct ListenerState {
     timeout: Duration,
     on_timeout: Option<String>,
     on_resume: Option<String>,
+    inhibit_policy: InhibitPolicy,
     phase: ListenerPhase,
 }
 
@@ -142,7 +174,9 @@ enum ListenerPhase {
 mod tests {
     use std::time::Duration;
 
-    use super::{CommandIntent, CommandKind, ListenerError, ListenerId, ListenerSet};
+    use super::{
+        CommandIntent, CommandKind, InhibitPolicy, ListenerError, ListenerId, ListenerSet,
+    };
     use crate::config::{Config, GeneralConfig, ListenerConfig};
 
     #[test]
@@ -152,8 +186,16 @@ mod tests {
         assert_eq!(set.len(), 2);
         assert_eq!(set.timeout_requests()[0].listener_id.index(), 0);
         assert_eq!(set.timeout_requests()[0].timeout, Duration::from_secs(300));
+        assert_eq!(
+            set.timeout_requests()[0].inhibit_policy,
+            InhibitPolicy::Ignore
+        );
         assert_eq!(set.timeout_requests()[1].listener_id.index(), 1);
         assert_eq!(set.timeout_requests()[1].timeout, Duration::from_secs(600));
+        assert_eq!(
+            set.timeout_requests()[1].inhibit_policy,
+            InhibitPolicy::Respect
+        );
     }
 
     #[test]
@@ -217,6 +259,7 @@ mod tests {
                 timeout_seconds: 5,
                 on_timeout: None,
                 on_resume: Some("resume".to_string()),
+                ignore_inhibit: false,
             }],
         };
         let mut set = ListenerSet::from_config(&config);
@@ -242,6 +285,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn inhibition_resumes_only_listeners_that_respect_it() {
+        let mut set = ListenerSet::from_config(&sample_config());
+        assert!(set.mark_timed_out(ListenerId(0)).is_ok());
+        assert!(set.mark_timed_out(ListenerId(1)).is_ok());
+
+        assert_eq!(
+            set.mark_active_respecting_inhibitors(),
+            vec![CommandIntent {
+                listener_id: ListenerId(1),
+                kind: CommandKind::Resume,
+                command: "sweetsmsg output '*' power on".to_string(),
+            }]
+        );
+        assert_eq!(
+            set.mark_timed_out(ListenerId(1)),
+            Ok(Some(CommandIntent {
+                listener_id: ListenerId(1),
+                kind: CommandKind::Timeout,
+                command: "sweetsmsg output '*' power off".to_string(),
+            }))
+        );
+        assert_eq!(set.mark_timed_out(ListenerId(0)), Ok(None));
+    }
+
     fn sample_config() -> Config {
         Config {
             general: GeneralConfig::default(),
@@ -251,11 +319,13 @@ mod tests {
                     timeout_seconds: 300,
                     on_timeout: Some("sweetslock".to_string()),
                     on_resume: None,
+                    ignore_inhibit: true,
                 },
                 ListenerConfig {
                     timeout_seconds: 600,
                     on_timeout: Some("sweetsmsg output '*' power off".to_string()),
                     on_resume: Some("sweetsmsg output '*' power on".to_string()),
+                    ignore_inhibit: false,
                 },
             ],
         }

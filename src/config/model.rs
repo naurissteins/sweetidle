@@ -35,4 +35,5 @@ pub struct ListenerConfig {
     pub timeout_seconds: u64,
     pub on_timeout: Option<String>,
     pub on_resume: Option<String>,
+    pub ignore_inhibit: bool,
 }

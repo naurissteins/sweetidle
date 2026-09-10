@@ -433,6 +433,7 @@ mod tests {
             timeout_seconds: 30,
             on_timeout: Some("lock".to_string()),
             on_resume: None,
+            ignore_inhibit: true,
         });
 
         assert_eq!(
