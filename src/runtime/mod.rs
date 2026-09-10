@@ -19,6 +19,7 @@ use self::{
 use crate::{
     command::{FinishedCommand, ProcessCompletion, ProcessError, ProcessStart, SkipDecision},
     config::{Config, ConfigLoadError},
+    control::ControlMonitor,
     listener::ListenerSet,
     session::{DbusInhibitMonitor, LogindFeatures, LogindMonitor, SystemdIdleInhibitor},
     wayland::IdleWaylandConnection,
@@ -88,6 +89,7 @@ pub struct IdleRuntime {
     _reload: Option<ConfigReloadMonitor>,
     logind: Option<LogindMonitor>,
     _dbus_inhibit: Option<DbusInhibitMonitor>,
+    _control: ControlMonitor,
 }
 
 impl IdleRuntime {
@@ -121,6 +123,7 @@ impl IdleRuntime {
         register_sources(&event_loop.handle(), reload_requester.is_some())?;
         let logind = register_logind(config, &event_loop)?;
         let dbus_inhibit = register_dbus_inhibit(config, &event_loop)?;
+        let control = register_control(&event_loop)?;
 
         Ok(Self {
             event_loop,
@@ -129,6 +132,7 @@ impl IdleRuntime {
             _reload: reload,
             logind,
             _dbus_inhibit: dbus_inhibit,
+            _control: control,
         })
     }
 
@@ -150,6 +154,7 @@ impl IdleRuntime {
         self.state.route_reload_events()?;
         self.state.route_session_events()?;
         self.state.route_wayland_events()?;
+        self.state.route_control_events()?;
         self.flush_idle_hint_updates()?;
         self.state
             .dispatch_command_intents(&self.event_loop.handle())?;
@@ -181,6 +186,20 @@ impl IdleRuntime {
 
         Ok(())
     }
+}
+
+fn register_control(
+    event_loop: &EventLoop<'static, RuntimeState>,
+) -> Result<ControlMonitor, RuntimeError> {
+    let (monitor, source) = ControlMonitor::connect().map_err(RuntimeError::Control)?;
+    event_loop
+        .handle()
+        .insert_source(source, |event, _, state: &mut RuntimeState| match event {
+            ChannelEvent::Msg(event) => state.record_control_event(event),
+            ChannelEvent::Closed => state.mark_control_channel_closed(),
+        })
+        .map_err(|error| RuntimeError::RegisterControl(error.error))?;
+    Ok(monitor)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

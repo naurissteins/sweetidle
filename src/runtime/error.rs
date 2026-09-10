@@ -2,6 +2,7 @@ use std::{error::Error, fmt, io};
 
 use crate::{
     command::{CommandDispatchError, CommandId, ProcessError},
+    control::ControlError,
     listener::{ListenerError, ListenerId},
     session::{DbusInhibitError, SessionError},
     wayland::IdleWaylandError,
@@ -23,6 +24,9 @@ pub enum RuntimeError {
     DbusInhibit(DbusInhibitError),
     RegisterDbusInhibit(calloop::Error),
     DbusInhibitChannelClosed,
+    Control(ControlError),
+    RegisterControl(calloop::Error),
+    ControlChannelClosed,
     CreateSignalPipe {
         signal: &'static str,
         source: io::Error,
@@ -105,6 +109,14 @@ impl fmt::Display for RuntimeError {
             Self::DbusInhibitChannelClosed => {
                 write!(formatter, "D-Bus inhibitor event channel closed")
             }
+            Self::Control(source) => write!(formatter, "control socket failed: {source}"),
+            Self::RegisterControl(source) => {
+                write!(
+                    formatter,
+                    "failed to register control socket source: {source}"
+                )
+            }
+            Self::ControlChannelClosed => write!(formatter, "control socket event channel closed"),
             Self::CreateSignalPipe { signal, source } => {
                 write!(formatter, "failed to create {signal} signal pipe: {source}")
             }
@@ -163,6 +175,7 @@ impl Error for RuntimeError {
             | Self::RegisterReload(source)
             | Self::RegisterSession(source)
             | Self::RegisterDbusInhibit(source)
+            | Self::RegisterControl(source)
             | Self::Dispatch(source)
             | Self::RegisterProcessMonitor { source, .. } => Some(source),
             Self::CreateSignalPipe { source, .. } | Self::RegisterSignalHandler { source, .. } => {
@@ -173,6 +186,7 @@ impl Error for RuntimeError {
             Self::Process(source) => Some(source),
             Self::Session(source) => Some(source),
             Self::DbusInhibit(source) => Some(source),
+            Self::Control(source) => Some(source),
             Self::CommandDispatch(source) => Some(source),
             Self::MonitorProcess { source, .. } => Some(source),
             Self::Listener(_)
@@ -181,6 +195,7 @@ impl Error for RuntimeError {
             | Self::SessionChannelClosed
             | Self::IdleHintMonitorMissing
             | Self::DbusInhibitChannelClosed
+            | Self::ControlChannelClosed
             | Self::InvalidProcessId(_)
             | Self::ProcessNotReady(_) => None,
         }
