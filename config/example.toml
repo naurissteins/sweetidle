@@ -18,8 +18,12 @@ timeout = 300
 [[listener]]
 timeout = 300
 on_timeout = "sweetslock"
+# Lock even when media playback or another application inhibits idle actions
+ignore_inhibit = true
 
 [[listener]]
 timeout = 600
 on_timeout = "sweetsmsg output '*' power off"
 on_resume = "sweetsmsg output '*' power on"
+# Keep outputs on while any compositor, D-Bus, or systemd inhibitor is active
+ignore_inhibit = false
