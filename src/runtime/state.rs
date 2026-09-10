@@ -287,8 +287,14 @@ impl RuntimeState {
     pub(super) fn route_control_events(&mut self) -> Result<(), RuntimeError> {
         for event in std::mem::take(&mut self.control_events) {
             match event {
-                ControlEvent::Status(request) => {
-                    request.respond(self.status_snapshot().to_string())
+                ControlEvent::Status { request, format } => {
+                    let response = self
+                        .status_snapshot()
+                        .render(format)
+                        .unwrap_or_else(|error| {
+                            format!("error: failed to serialize status: {error}\n")
+                        });
+                    request.respond(response);
                 }
                 ControlEvent::Pause(request) => {
                     let changed = self.pause_idle();
