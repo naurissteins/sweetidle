@@ -70,6 +70,27 @@ fn status_reports_live_listener_state() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[test]
+#[ignore = "runs the real daemon against a private Wayland compositor"]
+fn pause_suppresses_idle_actions_until_resume() -> Result<(), Box<dyn Error>> {
+    let mut harness = ReloadHarness::start("controlled")?;
+    harness.wait_for_markers(1)?;
+
+    assert_eq!(harness.control("pause")?, "sweetsidle: paused\n");
+    harness.compositor.pulse()?;
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(harness.markers()?, ["controlled"]);
+    assert!(harness.status()?.contains("sweetsidle: paused"));
+    assert_eq!(harness.control("pause")?, "sweetsidle: already paused\n");
+
+    assert_eq!(harness.control("resume")?, "sweetsidle: resumed\n");
+    harness.wait_for_markers(2)?;
+    assert!(harness.status()?.contains("sweetsidle: running"));
+    assert_eq!(harness.control("resume")?, "sweetsidle: already running\n");
+    harness.stop()?;
+    Ok(())
+}
+
 struct ReloadHarness {
     config_path: std::path::PathBuf,
     marker_path: std::path::PathBuf,
@@ -138,13 +159,17 @@ impl ReloadHarness {
     }
 
     fn status(&mut self) -> Result<String, Box<dyn Error>> {
+        self.control("status")
+    }
+
+    fn control(&mut self, command: &str) -> Result<String, Box<dyn Error>> {
         let output = Command::new(env!("CARGO_BIN_EXE_sweetsidle"))
-            .arg("status")
+            .arg(command)
             .env("XDG_RUNTIME_DIR", self.temp_dir.path())
             .output()?;
         if !output.status.success() {
             return Err(format!(
-                "status command failed with {}: {}",
+                "{command} command failed with {}: {}",
                 output.status,
                 String::from_utf8_lossy(&output.stderr)
             )

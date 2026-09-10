@@ -6,24 +6,22 @@ use crate::{
 };
 
 pub(crate) enum ControlEvent {
-    Status(StatusRequest),
+    Status(ControlRequest),
+    Pause(ControlRequest),
+    Resume(ControlRequest),
     Failed(super::ControlError),
 }
 
-pub(crate) struct StatusRequest {
+pub(crate) struct ControlRequest {
     reply: SyncSender<String>,
 }
 
-impl StatusRequest {
+impl ControlRequest {
     pub(crate) fn new(reply: SyncSender<String>) -> Self {
         Self { reply }
     }
 
-    pub(crate) fn respond(self, status: &StatusSnapshot) {
-        self.respond_text(status.to_string());
-    }
-
-    pub(super) fn respond_text(self, response: String) {
+    pub(crate) fn respond(self, response: String) {
         let _ = self.reply.try_send(response);
     }
 }
@@ -37,6 +35,7 @@ pub(crate) struct DbusInhibitorStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StatusSnapshot {
+    pub(crate) paused: bool,
     pub(crate) listeners: Vec<ListenerStatus>,
     pub(crate) dbus_inhibitors: Vec<DbusInhibitorStatus>,
     pub(crate) systemd_inhibitors: Vec<SystemdIdleInhibitor>,
@@ -45,7 +44,11 @@ pub(crate) struct StatusSnapshot {
 
 impl fmt::Display for StatusSnapshot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(formatter, "sweetsidle: running")?;
+        writeln!(
+            formatter,
+            "sweetsidle: {}",
+            if self.paused { "paused" } else { "running" }
+        )?;
         writeln!(
             formatter,
             "tracked inhibitors active: {}",
@@ -119,6 +122,7 @@ mod tests {
     #[test]
     fn formats_listener_and_inhibitor_details() {
         let status = StatusSnapshot {
+            paused: true,
             listeners: vec![ListenerStatus {
                 listener_id: ListenerId::from_index(0),
                 timeout: Duration::from_secs(300),
@@ -142,7 +146,7 @@ mod tests {
         assert_eq!(
             status.to_string(),
             concat!(
-                "sweetsidle: running\n",
+                "sweetsidle: paused\n",
                 "tracked inhibitors active: true\n",
                 "idle hint: active\n",
                 "listeners:\n",

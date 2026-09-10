@@ -21,7 +21,9 @@ fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
     match parse_args(args)? {
         Action::Help => print_help(),
         Action::Version => println!("sweetsidle {VERSION}"),
-        Action::Status => print_status()?,
+        Action::Status => print_control(control::query_status())?,
+        Action::Pause => print_control(control::pause())?,
+        Action::Resume => print_control(control::resume())?,
         Action::CheckConfig(path) => check_config_file(path)?,
         Action::Run { path, verbose } => run_daemon(path, verbose)?,
     }
@@ -34,6 +36,8 @@ enum Action {
     Help,
     Version,
     Status,
+    Pause,
+    Resume,
     CheckConfig(Option<PathBuf>),
     Run {
         path: Option<PathBuf>,
@@ -45,7 +49,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Action, String> 
     let mut check_config = false;
     let mut config_path = None;
     let mut verbose = false;
-    let mut status = false;
+    let mut control_action = None;
     let mut args = args.into_iter();
 
     while let Some(arg) = args.next() {
@@ -53,7 +57,9 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Action, String> 
             "-h" | "--help" => return Ok(Action::Help),
             "-V" | "--version" => return Ok(Action::Version),
             "-v" | "--verbose" => verbose = true,
-            "status" => status = true,
+            "status" => set_control_action(&mut control_action, Action::Status)?,
+            "pause" => set_control_action(&mut control_action, Action::Pause)?,
+            "resume" => set_control_action(&mut control_action, Action::Resume)?,
             "--check-config" => check_config = true,
             "-c" | "--config" => {
                 let path = args
@@ -65,11 +71,13 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Action, String> 
         }
     }
 
-    if status {
+    if let Some(action) = control_action {
         if check_config || verbose || config_path.is_some() {
-            return Err("`status` cannot be combined with daemon or config options".to_string());
+            return Err(
+                "control commands cannot be combined with daemon or config options".to_string(),
+            );
         }
-        Ok(Action::Status)
+        Ok(action)
     } else if check_config {
         if verbose {
             return Err("`--verbose` cannot be used with `--check-config`".to_string());
@@ -83,16 +91,25 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Action, String> 
     }
 }
 
+fn set_control_action(current: &mut Option<Action>, action: Action) -> Result<(), String> {
+    if current.replace(action).is_some() {
+        return Err("only one control command may be specified".to_string());
+    }
+    Ok(())
+}
+
 fn print_help() {
     println!(
         "\
 sweetsidle {VERSION}
 
 Usage: sweetsidle [OPTIONS]
-       sweetsidle status
+       sweetsidle <COMMAND>
 
 Commands:
   status              Show listener and inhibitor state
+  pause               Pause idle listeners and the idle hint
+  resume              Resume idle detection with fresh timers
 
 Options:
   -c, --config <PATH>  Use a specific config file
@@ -104,9 +121,8 @@ Options:
     );
 }
 
-fn print_status() -> Result<(), String> {
-    let status = control::query_status().map_err(|error| error.to_string())?;
-    print!("{status}");
+fn print_control(response: Result<String, control::ControlError>) -> Result<(), String> {
+    print!("{}", response.map_err(|error| error.to_string())?);
     Ok(())
 }
 
@@ -223,6 +239,14 @@ fn handle_runtime_event(event: RuntimeEvent) -> RuntimeControl {
         RuntimeEvent::ConfigReloadReady(config) => RuntimeControl::Reload(config),
         RuntimeEvent::ConfigReloadRejected(error) => {
             warn!(error = %error, "configuration reload rejected; keeping current configuration");
+            RuntimeControl::Continue
+        }
+        RuntimeEvent::IdlePaused => {
+            info!("idle detection paused");
+            RuntimeControl::Continue
+        }
+        RuntimeEvent::IdleResumed => {
+            info!("idle detection resumed");
             RuntimeControl::Continue
         }
         RuntimeEvent::PreparingForSleep => {
@@ -450,7 +474,21 @@ mod tests {
     fn status_rejects_daemon_options() {
         assert_eq!(
             parse_args(["status".to_string(), "--verbose".to_string()]),
-            Err("`status` cannot be combined with daemon or config options".to_string())
+            Err("control commands cannot be combined with daemon or config options".to_string())
+        );
+    }
+
+    #[test]
+    fn pause_and_resume_select_control_actions() {
+        assert_eq!(parse_args(["pause".to_string()]), Ok(Action::Pause));
+        assert_eq!(parse_args(["resume".to_string()]), Ok(Action::Resume));
+    }
+
+    #[test]
+    fn rejects_multiple_control_commands() {
+        assert_eq!(
+            parse_args(["pause".to_string(), "resume".to_string()]),
+            Err("only one control command may be specified".to_string())
         );
     }
 }

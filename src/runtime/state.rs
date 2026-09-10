@@ -40,6 +40,7 @@ pub(super) struct RuntimeState {
     dbus_inhibit_channel_closed: bool,
     control_events: Vec<ControlEvent>,
     control_channel_closed: bool,
+    paused: bool,
     reload_requester: Option<ConfigReloadRequester>,
     reload_events: Vec<ConfigReloadEvent>,
     reload_request_failed: bool,
@@ -83,6 +84,7 @@ impl RuntimeState {
             dbus_inhibit_channel_closed: false,
             control_events: Vec::new(),
             control_channel_closed: false,
+            paused: false,
             reload_requester,
             reload_events: Vec::new(),
             reload_request_failed: false,
@@ -106,6 +108,11 @@ impl RuntimeState {
     }
 
     pub(super) fn route_wayland_events(&mut self) -> Result<(), RuntimeError> {
+        if self.paused {
+            self.wayland.take_events();
+            return Ok(());
+        }
+
         for event in self.wayland.take_events() {
             self.route_idle_event(event)?;
         }
@@ -119,6 +126,9 @@ impl RuntimeState {
             &listeners.timeout_requests(),
             config.idle_hint_timeout_seconds.map(Duration::from_secs),
         )?;
+        if self.paused {
+            self.wayland.pause_notifications();
+        }
 
         self.listeners = listeners;
         self.lock_command = config.general.lock_command.clone();
@@ -277,7 +287,25 @@ impl RuntimeState {
     pub(super) fn route_control_events(&mut self) -> Result<(), RuntimeError> {
         for event in std::mem::take(&mut self.control_events) {
             match event {
-                ControlEvent::Status(request) => request.respond(&self.status_snapshot()),
+                ControlEvent::Status(request) => {
+                    request.respond(self.status_snapshot().to_string())
+                }
+                ControlEvent::Pause(request) => {
+                    let changed = self.pause_idle();
+                    request.respond(if changed {
+                        "sweetsidle: paused\n".to_string()
+                    } else {
+                        "sweetsidle: already paused\n".to_string()
+                    });
+                }
+                ControlEvent::Resume(request) => {
+                    let changed = self.resume_idle()?;
+                    request.respond(if changed {
+                        "sweetsidle: resumed\n".to_string()
+                    } else {
+                        "sweetsidle: already running\n".to_string()
+                    });
+                }
                 ControlEvent::Failed(error) => return Err(RuntimeError::Control(error)),
             }
         }
@@ -444,6 +472,10 @@ impl RuntimeState {
     }
 
     fn route_idle_event(&mut self, event: IdleEvent) -> Result<(), RuntimeError> {
+        if self.paused {
+            return Ok(());
+        }
+
         match event {
             IdleEvent::Idled(listener_id) => {
                 let inhibit_policy = self
@@ -513,6 +545,7 @@ impl RuntimeState {
         dbus_inhibitors.sort_unstable_by_key(|inhibitor| inhibitor.cookie);
 
         StatusSnapshot {
+            paused: self.paused,
             listeners: self.listeners.status(),
             dbus_inhibitors,
             systemd_inhibitors: self.active_systemd_inhibitor_details.clone(),
@@ -526,7 +559,7 @@ impl RuntimeState {
     ) -> Result<(), RuntimeError> {
         let is_inhibited = self.idle_inhibited();
 
-        if was_inhibited == is_inhibited {
+        if was_inhibited == is_inhibited || self.paused {
             return Ok(());
         }
 
@@ -538,6 +571,31 @@ impl RuntimeState {
         }
 
         Ok(())
+    }
+
+    fn pause_idle(&mut self) -> bool {
+        if self.paused {
+            return false;
+        }
+
+        self.wayland.pause_notifications();
+        self.listeners.reset();
+        self.command_intents.clear();
+        self.set_idle_hint(false);
+        self.paused = true;
+        self.runtime_events.push(RuntimeEvent::IdlePaused);
+        true
+    }
+
+    fn resume_idle(&mut self) -> Result<bool, RuntimeError> {
+        if !self.paused {
+            return Ok(false);
+        }
+
+        self.wayland.reset_notifications()?;
+        self.paused = false;
+        self.runtime_events.push(RuntimeEvent::IdleResumed);
+        Ok(true)
     }
 
     fn set_idle_hint(&mut self, idle: bool) {
@@ -644,7 +702,7 @@ fn register_process_monitor(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, os::fd::OwnedFd, time::Duration};
+    use std::{fs::File, os::fd::OwnedFd, sync::mpsc, time::Duration};
 
     use calloop::EventLoop;
 
@@ -652,6 +710,7 @@ mod tests {
     use crate::{
         command::CommandContext,
         config::{Config, GeneralConfig, ListenerConfig},
+        control::{ControlEvent, ControlRequest},
         listener::{CommandIntent, CommandKind, ListenerError, ListenerId, ListenerSet},
         runtime::{RuntimeError, RuntimeEvent, ShutdownSignal},
         session::{
@@ -928,6 +987,85 @@ mod tests {
         assert!(status.contains("id=0 state=timed-out timeout=300s inhibitors=ignored"));
         assert!(status.contains("source=dbus cookie=7 application=\"test application\""));
         assert!(status.contains("source=systemd pid=42 uid=1000 who=\"test application\""));
+    }
+
+    #[test]
+    fn pause_control_resets_listener_state_without_resume_actions() {
+        let mut state = runtime_state();
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(1))));
+        state.command_intents.clear();
+        let (reply, response) = mpsc::sync_channel(1);
+        state.record_control_event(ControlEvent::Pause(ControlRequest::new(reply)));
+
+        assert_runtime_ok(state.route_control_events());
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Resumed(ListenerId::from_index(1))));
+
+        assert_eq!(response.recv(), Ok("sweetsidle: paused\n".to_string()));
+        assert!(state.command_intents.is_empty());
+        assert!(
+            state
+                .status_snapshot()
+                .to_string()
+                .contains("sweetsidle: paused")
+        );
+    }
+
+    #[test]
+    fn pause_and_resume_controls_are_idempotent() {
+        let mut state = runtime_state();
+        assert!(state.pause_idle());
+        assert!(!state.pause_idle());
+        assert!(matches!(state.resume_idle(), Ok(true)));
+
+        assert!(!state.paused);
+        assert!(matches!(state.resume_idle(), Ok(false)));
+    }
+
+    #[test]
+    fn paused_runtime_suppresses_idle_events() {
+        let mut state = runtime_state();
+        assert!(state.pause_idle());
+        state.take_runtime_events();
+
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(0))));
+
+        assert!(state.command_intents.is_empty());
+        assert!(state.take_runtime_events().is_empty());
+    }
+
+    #[test]
+    fn pausing_clears_an_active_idle_hint() {
+        let mut state = idle_hint_runtime_state();
+        assert_runtime_ok(state.route_idle_event(IdleEvent::IdleHintIdled));
+        state.take_idle_hint_updates();
+
+        assert!(state.pause_idle());
+
+        assert_eq!(state.take_idle_hint_updates(), vec![false]);
+    }
+
+    #[test]
+    fn config_reload_preserves_paused_state() {
+        let mut state = runtime_state();
+        assert!(state.pause_idle());
+        let config = Config {
+            listeners: vec![ListenerConfig {
+                timeout_seconds: 45,
+                on_timeout: Some("new lock".to_string()),
+                on_resume: None,
+                ignore_inhibit: false,
+            }],
+            ..Config::default()
+        };
+
+        assert_runtime_ok(state.apply_config(&config));
+
+        assert!(
+            state
+                .status_snapshot()
+                .to_string()
+                .contains("sweetsidle: paused")
+        );
     }
 
     #[test]
