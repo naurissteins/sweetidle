@@ -1,15 +1,26 @@
 use std::{fmt, sync::mpsc::SyncSender};
 
+use serde::Serialize;
+
 use crate::{
     listener::{InhibitPolicy, ListenerPhase, ListenerStatus},
     session::SystemdIdleInhibitor,
 };
 
 pub(crate) enum ControlEvent {
-    Status(ControlRequest),
+    Status {
+        request: ControlRequest,
+        format: StatusFormat,
+    },
     Pause(ControlRequest),
     Resume(ControlRequest),
     Failed(super::ControlError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StatusFormat {
+    Text,
+    Json,
 }
 
 pub(crate) struct ControlRequest {
@@ -40,6 +51,103 @@ pub(crate) struct StatusSnapshot {
     pub(crate) dbus_inhibitors: Vec<DbusInhibitorStatus>,
     pub(crate) systemd_inhibitors: Vec<SystemdIdleInhibitor>,
     pub(crate) idle_hint: Option<bool>,
+}
+
+impl StatusSnapshot {
+    pub(crate) fn render(&self, format: StatusFormat) -> Result<String, serde_json::Error> {
+        match format {
+            StatusFormat::Text => Ok(self.to_string()),
+            StatusFormat::Json => self.render_json(),
+        }
+    }
+
+    fn render_json(&self) -> Result<String, serde_json::Error> {
+        let listeners = self
+            .listeners
+            .iter()
+            .map(|listener| JsonListenerStatus {
+                id: listener.listener_id.index(),
+                state: match listener.phase {
+                    ListenerPhase::Armed => "armed",
+                    ListenerPhase::TimedOut => "timed-out",
+                },
+                timeout_seconds: listener.timeout.as_secs(),
+                ignore_inhibit: listener.inhibit_policy == InhibitPolicy::Ignore,
+            })
+            .collect();
+        let dbus = self
+            .dbus_inhibitors
+            .iter()
+            .map(|inhibitor| JsonDbusInhibitor {
+                cookie: inhibitor.cookie,
+                application: &inhibitor.application,
+                reason: &inhibitor.reason,
+            })
+            .collect();
+        let systemd = self
+            .systemd_inhibitors
+            .iter()
+            .map(|inhibitor| JsonSystemdInhibitor {
+                pid: inhibitor.pid,
+                uid: inhibitor.uid,
+                who: &inhibitor.who,
+                why: &inhibitor.why,
+            })
+            .collect();
+        let status = JsonStatus {
+            schema_version: 1,
+            paused: self.paused,
+            idle_hint: self.idle_hint,
+            listeners,
+            inhibitors: JsonInhibitors {
+                active: !self.dbus_inhibitors.is_empty() || !self.systemd_inhibitors.is_empty(),
+                dbus,
+                systemd,
+            },
+        };
+        let mut response = serde_json::to_string(&status)?;
+        response.push('\n');
+        Ok(response)
+    }
+}
+
+#[derive(Serialize)]
+struct JsonStatus<'a> {
+    schema_version: u8,
+    paused: bool,
+    idle_hint: Option<bool>,
+    listeners: Vec<JsonListenerStatus>,
+    inhibitors: JsonInhibitors<'a>,
+}
+
+#[derive(Serialize)]
+struct JsonListenerStatus {
+    id: usize,
+    state: &'static str,
+    timeout_seconds: u64,
+    ignore_inhibit: bool,
+}
+
+#[derive(Serialize)]
+struct JsonInhibitors<'a> {
+    active: bool,
+    dbus: Vec<JsonDbusInhibitor<'a>>,
+    systemd: Vec<JsonSystemdInhibitor<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonDbusInhibitor<'a> {
+    cookie: u32,
+    application: &'a str,
+    reason: &'a str,
+}
+
+#[derive(Serialize)]
+struct JsonSystemdInhibitor<'a> {
+    pid: u32,
+    uid: u32,
+    who: &'a str,
+    why: &'a str,
 }
 
 impl fmt::Display for StatusSnapshot {
@@ -113,7 +221,7 @@ impl fmt::Display for StatusSnapshot {
 mod tests {
     use std::time::Duration;
 
-    use super::{DbusInhibitorStatus, StatusSnapshot};
+    use super::{DbusInhibitorStatus, StatusFormat, StatusSnapshot};
     use crate::{
         listener::{InhibitPolicy, ListenerId, ListenerPhase, ListenerStatus},
         session::SystemdIdleInhibitor,
@@ -156,5 +264,66 @@ mod tests {
                 "  - source=systemd pid=42 uid=1000 who=\"backup\" why=\"saving files\"\n",
             )
         );
+    }
+
+    #[test]
+    fn formats_machine_readable_status_as_json() {
+        let status = StatusSnapshot {
+            paused: true,
+            listeners: vec![ListenerStatus {
+                listener_id: ListenerId::from_index(0),
+                timeout: Duration::from_secs(300),
+                inhibit_policy: InhibitPolicy::Ignore,
+                phase: ListenerPhase::TimedOut,
+            }],
+            dbus_inhibitors: vec![DbusInhibitorStatus {
+                cookie: 7,
+                application: "video player".to_string(),
+                reason: "playing\nmedia".to_string(),
+            }],
+            systemd_inhibitors: vec![SystemdIdleInhibitor {
+                who: "backup".to_string(),
+                why: "saving files".to_string(),
+                uid: 1000,
+                pid: 42,
+            }],
+            idle_hint: Some(false),
+        };
+
+        let rendered = status
+            .render(StatusFormat::Json)
+            .unwrap_or_else(|error| panic!("JSON status failed: {error}"));
+        let value: serde_json::Value = serde_json::from_str(&rendered)
+            .unwrap_or_else(|error| panic!("JSON status was invalid: {error}"));
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "schema_version": 1,
+                "paused": true,
+                "idle_hint": false,
+                "listeners": [{
+                    "id": 0,
+                    "state": "timed-out",
+                    "timeout_seconds": 300,
+                    "ignore_inhibit": true
+                }],
+                "inhibitors": {
+                    "active": true,
+                    "dbus": [{
+                        "cookie": 7,
+                        "application": "video player",
+                        "reason": "playing\nmedia"
+                    }],
+                    "systemd": [{
+                        "pid": 42,
+                        "uid": 1000,
+                        "who": "backup",
+                        "why": "saving files"
+                    }]
+                }
+            })
+        );
+        assert!(rendered.ends_with('\n'));
     }
 }

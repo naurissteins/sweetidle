@@ -16,10 +16,11 @@ use std::{
 use calloop::channel::{Channel, Sender as EventSender, channel};
 use rustix::event::{PollFd, PollFlags, poll};
 
-use super::{ControlError, ControlEvent, ControlRequest};
+use super::{ControlError, ControlEvent, ControlRequest, StatusFormat};
 
 const SOCKET_NAME: &str = "sweetsidle.sock";
 const STATUS_COMMAND: &[u8] = b"status\n";
+const STATUS_JSON_COMMAND: &[u8] = b"status-json\n";
 const PAUSE_COMMAND: &[u8] = b"pause\n";
 const RESUME_COMMAND: &[u8] = b"resume\n";
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
@@ -73,6 +74,10 @@ impl Drop for ControlMonitor {
 
 pub fn query_status() -> Result<String, ControlError> {
     send_command_at(&control_socket_path()?, STATUS_COMMAND)
+}
+
+pub fn query_status_json() -> Result<String, ControlError> {
+    send_command_at(&control_socket_path()?, STATUS_JSON_COMMAND)
 }
 
 pub fn pause() -> Result<String, ControlError> {
@@ -261,7 +266,10 @@ fn handle_client(
     let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
     let control_request = ControlRequest::new(reply_sender);
     let event = match command {
-        ControlCommand::Status => ControlEvent::Status(control_request),
+        ControlCommand::Status(format) => ControlEvent::Status {
+            request: control_request,
+            format,
+        },
         ControlCommand::Pause => ControlEvent::Pause(control_request),
         ControlCommand::Resume => ControlEvent::Resume(control_request),
     };
@@ -281,14 +289,15 @@ fn handle_client(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ControlCommand {
-    Status,
+    Status(StatusFormat),
     Pause,
     Resume,
 }
 
 fn request_command(request: &[u8]) -> Result<ControlCommand, ClientRequestError> {
     match request {
-        STATUS_COMMAND => Ok(ControlCommand::Status),
+        STATUS_COMMAND => Ok(ControlCommand::Status(StatusFormat::Text)),
+        STATUS_JSON_COMMAND => Ok(ControlCommand::Status(StatusFormat::Json)),
         PAUSE_COMMAND => Ok(ControlCommand::Pause),
         RESUME_COMMAND => Ok(ControlCommand::Resume),
         _ => Err(ClientRequestError::UnknownCommand),
@@ -363,7 +372,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        ControlError, ControlEvent, ControlMonitor, PAUSE_COMMAND, STATUS_COMMAND, send_command_at,
+        ControlError, ControlEvent, ControlMonitor, PAUSE_COMMAND, STATUS_COMMAND,
+        STATUS_JSON_COMMAND, StatusFormat, send_command_at,
     };
 
     #[test]
@@ -379,7 +389,10 @@ mod tests {
             .recv()
             .unwrap_or_else(|error| panic!("control event missing: {error}"));
         match event {
-            ControlEvent::Status(request) => request.respond("status response\n".to_string()),
+            ControlEvent::Status { request, format } => {
+                assert_eq!(format, StatusFormat::Text);
+                request.respond("status response\n".to_string());
+            }
             ControlEvent::Pause(_) | ControlEvent::Resume(_) => {
                 panic!("unexpected control command")
             }
@@ -399,6 +412,37 @@ mod tests {
         assert_eq!(mode, 0o600);
         drop(monitor);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn json_status_request_round_trips_through_the_worker() {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("temp dir failed: {error}"));
+        let path = temp.path().join("control.sock");
+        let (monitor, events) = ControlMonitor::connect_at(path.clone())
+            .unwrap_or_else(|error| panic!("control monitor failed: {error}"));
+        let client_path = path.clone();
+        let client = thread::spawn(move || send_command_at(&client_path, STATUS_JSON_COMMAND));
+
+        let event = events
+            .recv()
+            .unwrap_or_else(|error| panic!("control event missing: {error}"));
+        match event {
+            ControlEvent::Status { request, format } => {
+                assert_eq!(format, StatusFormat::Json);
+                request.respond("{\"paused\":false}\n".to_string());
+            }
+            ControlEvent::Pause(_) | ControlEvent::Resume(_) => {
+                panic!("unexpected control command")
+            }
+            ControlEvent::Failed(error) => panic!("control worker failed: {error}"),
+        }
+
+        let response = client
+            .join()
+            .unwrap_or_else(|_| panic!("control client panicked"))
+            .unwrap_or_else(|error| panic!("JSON status request failed: {error}"));
+        assert_eq!(response, "{\"paused\":false}\n");
+        drop(monitor);
     }
 
     #[test]
@@ -428,7 +472,10 @@ mod tests {
             .recv()
             .unwrap_or_else(|error| panic!("control event missing: {error}"));
         match event {
-            ControlEvent::Status(request) => request.respond("still running\n".to_string()),
+            ControlEvent::Status { request, format } => {
+                assert_eq!(format, StatusFormat::Text);
+                request.respond("still running\n".to_string());
+            }
             ControlEvent::Pause(_) | ControlEvent::Resume(_) => {
                 panic!("unexpected control command")
             }
@@ -456,7 +503,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("control event missing: {error}"));
         match event {
             ControlEvent::Pause(request) => request.respond("sweetsidle: paused\n".to_string()),
-            ControlEvent::Status(_) | ControlEvent::Resume(_) => {
+            ControlEvent::Status { .. } | ControlEvent::Resume(_) => {
                 panic!("unexpected control command")
             }
             ControlEvent::Failed(error) => panic!("control worker failed: {error}"),

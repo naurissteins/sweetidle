@@ -21,7 +21,8 @@ fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
     match parse_args(args)? {
         Action::Help => print_help(),
         Action::Version => println!("sweetsidle {VERSION}"),
-        Action::Status => print_control(control::query_status())?,
+        Action::Status(StatusOutput::Text) => print_control(control::query_status())?,
+        Action::Status(StatusOutput::Json) => print_control(control::query_status_json())?,
         Action::Pause => print_control(control::pause())?,
         Action::Resume => print_control(control::resume())?,
         Action::CheckConfig(path) => check_config_file(path)?,
@@ -35,7 +36,7 @@ fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
 enum Action {
     Help,
     Version,
-    Status,
+    Status(StatusOutput),
     Pause,
     Resume,
     CheckConfig(Option<PathBuf>),
@@ -45,10 +46,17 @@ enum Action {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusOutput {
+    Text,
+    Json,
+}
+
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Action, String> {
     let mut check_config = false;
     let mut config_path = None;
     let mut verbose = false;
+    let mut status_json = false;
     let mut control_action = None;
     let mut args = args.into_iter();
 
@@ -57,9 +65,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Action, String> 
             "-h" | "--help" => return Ok(Action::Help),
             "-V" | "--version" => return Ok(Action::Version),
             "-v" | "--verbose" => verbose = true,
-            "status" => set_control_action(&mut control_action, Action::Status)?,
+            "status" => {
+                set_control_action(&mut control_action, Action::Status(StatusOutput::Text))?
+            }
             "pause" => set_control_action(&mut control_action, Action::Pause)?,
             "resume" => set_control_action(&mut control_action, Action::Resume)?,
+            "--json" => status_json = true,
             "--check-config" => check_config = true,
             "-c" | "--config" => {
                 let path = args
@@ -77,13 +88,24 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Action, String> 
                 "control commands cannot be combined with daemon or config options".to_string(),
             );
         }
-        Ok(action)
+        match (action, status_json) {
+            (Action::Status(_), true) => Ok(Action::Status(StatusOutput::Json)),
+            (Action::Status(_), false) => Ok(Action::Status(StatusOutput::Text)),
+            (_, true) => Err("`--json` can only be used with `status`".to_string()),
+            (action, false) => Ok(action),
+        }
     } else if check_config {
+        if status_json {
+            return Err("`--json` can only be used with `status`".to_string());
+        }
         if verbose {
             return Err("`--verbose` cannot be used with `--check-config`".to_string());
         }
         Ok(Action::CheckConfig(config_path))
     } else {
+        if status_json {
+            return Err("`--json` can only be used with `status`".to_string());
+        }
         Ok(Action::Run {
             path: config_path,
             verbose,
@@ -107,11 +129,12 @@ Usage: sweetsidle [OPTIONS]
        sweetsidle <COMMAND>
 
 Commands:
-  status              Show listener and inhibitor state
+  status [--json]     Show listener and inhibitor state
   pause               Pause idle listeners and the idle hint
   resume              Resume idle detection with fresh timers
 
 Options:
+      --json           Print status as JSON (status only)
   -c, --config <PATH>  Use a specific config file
       --check-config   Parse and validate the config file, then exit
   -v, --verbose        Enable debug logging while running
@@ -410,7 +433,7 @@ fn default_config_path() -> Result<PathBuf, String> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{Action, parse_args};
+    use super::{Action, StatusOutput, parse_args};
 
     #[test]
     fn no_arguments_runs_with_the_default_config() {
@@ -467,7 +490,22 @@ mod tests {
 
     #[test]
     fn status_selects_the_control_client() {
-        assert_eq!(parse_args(["status".to_string()]), Ok(Action::Status));
+        assert_eq!(
+            parse_args(["status".to_string()]),
+            Ok(Action::Status(StatusOutput::Text))
+        );
+    }
+
+    #[test]
+    fn status_json_selects_machine_readable_output() {
+        assert_eq!(
+            parse_args(["status".to_string(), "--json".to_string()]),
+            Ok(Action::Status(StatusOutput::Json))
+        );
+        assert_eq!(
+            parse_args(["--json".to_string(), "status".to_string()]),
+            Ok(Action::Status(StatusOutput::Json))
+        );
     }
 
     #[test]
@@ -482,6 +520,18 @@ mod tests {
     fn pause_and_resume_select_control_actions() {
         assert_eq!(parse_args(["pause".to_string()]), Ok(Action::Pause));
         assert_eq!(parse_args(["resume".to_string()]), Ok(Action::Resume));
+    }
+
+    #[test]
+    fn json_is_rejected_without_status() {
+        assert_eq!(
+            parse_args(["pause".to_string(), "--json".to_string()]),
+            Err("`--json` can only be used with `status`".to_string())
+        );
+        assert_eq!(
+            parse_args(["--json".to_string()]),
+            Err("`--json` can only be used with `status`".to_string())
+        );
     }
 
     #[test]

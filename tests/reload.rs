@@ -72,6 +72,28 @@ fn status_reports_live_listener_state() -> Result<(), Box<dyn Error>> {
 
 #[test]
 #[ignore = "runs the real daemon against a private Wayland compositor"]
+fn json_status_reports_live_listener_state() -> Result<(), Box<dyn Error>> {
+    let mut harness = ReloadHarness::start("status-json")?;
+    harness.wait_for_markers(1)?;
+
+    let status: serde_json::Value = serde_json::from_str(&harness.status_json()?)?;
+
+    assert_eq!(status["schema_version"], 1);
+    assert_eq!(status["paused"], false);
+    assert_eq!(status["idle_hint"], serde_json::Value::Null);
+    assert_eq!(status["listeners"][0]["id"], 0);
+    assert_eq!(status["listeners"][0]["state"], "timed-out");
+    assert_eq!(status["listeners"][0]["timeout_seconds"], 3600);
+    assert_eq!(status["listeners"][0]["ignore_inhibit"], true);
+    assert_eq!(status["inhibitors"]["active"], false);
+    assert_eq!(status["inhibitors"]["dbus"], serde_json::json!([]));
+    assert_eq!(status["inhibitors"]["systemd"], serde_json::json!([]));
+    harness.stop()?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "runs the real daemon against a private Wayland compositor"]
 fn pause_suppresses_idle_actions_until_resume() -> Result<(), Box<dyn Error>> {
     let mut harness = ReloadHarness::start("controlled")?;
     harness.wait_for_markers(1)?;
@@ -162,14 +184,23 @@ impl ReloadHarness {
         self.control("status")
     }
 
+    fn status_json(&mut self) -> Result<String, Box<dyn Error>> {
+        self.control_args(&["status", "--json"])
+    }
+
     fn control(&mut self, command: &str) -> Result<String, Box<dyn Error>> {
+        self.control_args(&[command])
+    }
+
+    fn control_args(&mut self, args: &[&str]) -> Result<String, Box<dyn Error>> {
         let output = Command::new(env!("CARGO_BIN_EXE_sweetsidle"))
-            .arg(command)
+            .args(args)
             .env("XDG_RUNTIME_DIR", self.temp_dir.path())
             .output()?;
         if !output.status.success() {
             return Err(format!(
-                "{command} command failed with {}: {}",
+                "{} command failed with {}: {}",
+                args.join(" "),
                 output.status,
                 String::from_utf8_lossy(&output.stderr)
             )
