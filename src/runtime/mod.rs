@@ -31,6 +31,8 @@ pub enum RuntimeEvent {
     ConfigReloadRequested,
     ConfigReloadReady(Config),
     ConfigReloadRejected(ConfigLoadError),
+    IdlePaused,
+    IdleResumed,
     PreparingForSleep,
     ResumedFromSleep,
     LockRequested,

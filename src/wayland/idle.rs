@@ -231,6 +231,15 @@ impl IdleWaylandState {
         Ok(())
     }
 
+    pub(crate) fn pause_notifications(&mut self) {
+        self.configuration_generation = self.configuration_generation.wrapping_add(1);
+        self.inhibition_generation = self.inhibition_generation.wrapping_add(1);
+        self.events.clear();
+        for notification in self.notifications.drain(..) {
+            notification.proxy.destroy();
+        }
+    }
+
     pub(crate) fn reset_inhibited_notifications(&mut self) -> Result<(), IdleWaylandError> {
         self.inhibition_generation = self.inhibition_generation.wrapping_add(1);
         self.events
@@ -673,6 +682,22 @@ mod tests {
             state.take_events(),
             vec![IdleEvent::Idled(ListenerId::from_index(1))]
         );
+    }
+
+    #[test]
+    fn pausing_discards_pending_events_and_rejects_old_callbacks() {
+        let listener_id = ListenerId::from_index(0);
+        let mut state = IdleWaylandState {
+            events: vec![IdleEvent::Idled(listener_id)],
+            configuration_generation: 2,
+            inhibition_generation: 4,
+            ..IdleWaylandState::default()
+        };
+
+        state.pause_notifications();
+
+        assert!(state.take_events().is_empty());
+        assert!(!state.accepts_generation(&notification_data(2, 4, InhibitPolicy::Respect)));
     }
 
     fn request(listener_index: usize, timeout_seconds: u64) -> TimeoutRequest {

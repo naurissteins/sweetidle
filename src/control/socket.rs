@@ -16,10 +16,12 @@ use std::{
 use calloop::channel::{Channel, Sender as EventSender, channel};
 use rustix::event::{PollFd, PollFlags, poll};
 
-use super::{ControlError, ControlEvent, StatusRequest};
+use super::{ControlError, ControlEvent, ControlRequest};
 
 const SOCKET_NAME: &str = "sweetsidle.sock";
 const STATUS_COMMAND: &[u8] = b"status\n";
+const PAUSE_COMMAND: &[u8] = b"pause\n";
+const RESUME_COMMAND: &[u8] = b"resume\n";
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_REQUEST_BYTES: u64 = 64;
 const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
@@ -70,10 +72,18 @@ impl Drop for ControlMonitor {
 }
 
 pub fn query_status() -> Result<String, ControlError> {
-    query_status_at(&control_socket_path()?)
+    send_command_at(&control_socket_path()?, STATUS_COMMAND)
 }
 
-fn query_status_at(socket_path: &Path) -> Result<String, ControlError> {
+pub fn pause() -> Result<String, ControlError> {
+    send_command_at(&control_socket_path()?, PAUSE_COMMAND)
+}
+
+pub fn resume() -> Result<String, ControlError> {
+    send_command_at(&control_socket_path()?, RESUME_COMMAND)
+}
+
+fn send_command_at(socket_path: &Path, command: &[u8]) -> Result<String, ControlError> {
     let mut stream = UnixStream::connect(socket_path).map_err(|source| ControlError::Connect {
         path: socket_path.to_path_buf(),
         source,
@@ -85,7 +95,7 @@ fn query_status_at(socket_path: &Path) -> Result<String, ControlError> {
         .set_write_timeout(Some(IO_TIMEOUT))
         .map_err(|source| ControlError::ConfigureClient { source })?;
     stream
-        .write_all(STATUS_COMMAND)
+        .write_all(command)
         .map_err(|source| ControlError::WriteRequest { source })?;
     stream
         .shutdown(std::net::Shutdown::Write)
@@ -247,13 +257,16 @@ fn handle_client(
     if request.len() as u64 > MAX_REQUEST_BYTES {
         return Err(ClientRequestError::TooLarge);
     }
-    if request != STATUS_COMMAND {
-        return Err(ClientRequestError::UnknownCommand);
-    }
-
+    let command = request_command(&request)?;
     let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
+    let control_request = ControlRequest::new(reply_sender);
+    let event = match command {
+        ControlCommand::Status => ControlEvent::Status(control_request),
+        ControlCommand::Pause => ControlEvent::Pause(control_request),
+        ControlCommand::Resume => ControlEvent::Resume(control_request),
+    };
     events
-        .send(ControlEvent::Status(StatusRequest::new(reply_sender)))
+        .send(event)
         .map_err(|_| ClientRequestError::RuntimeStopped)?;
     let response = reply_receiver
         .recv_timeout(IO_TIMEOUT)
@@ -264,6 +277,22 @@ fn handle_client(
     stream
         .write_all(response.as_bytes())
         .map_err(ClientRequestError::Io)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlCommand {
+    Status,
+    Pause,
+    Resume,
+}
+
+fn request_command(request: &[u8]) -> Result<ControlCommand, ClientRequestError> {
+    match request {
+        STATUS_COMMAND => Ok(ControlCommand::Status),
+        PAUSE_COMMAND => Ok(ControlCommand::Pause),
+        RESUME_COMMAND => Ok(ControlCommand::Resume),
+        _ => Err(ClientRequestError::UnknownCommand),
+    }
 }
 
 struct SocketFile {
@@ -333,7 +362,9 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{ControlError, ControlEvent, ControlMonitor, query_status_at};
+    use super::{
+        ControlError, ControlEvent, ControlMonitor, PAUSE_COMMAND, STATUS_COMMAND, send_command_at,
+    };
 
     #[test]
     fn status_request_round_trips_through_the_worker() {
@@ -342,13 +373,16 @@ mod tests {
         let (monitor, events) = ControlMonitor::connect_at(path.clone())
             .unwrap_or_else(|error| panic!("control monitor failed: {error}"));
         let client_path = path.clone();
-        let client = thread::spawn(move || query_status_at(&client_path));
+        let client = thread::spawn(move || send_command_at(&client_path, STATUS_COMMAND));
 
         let event = events
             .recv()
             .unwrap_or_else(|error| panic!("control event missing: {error}"));
         match event {
-            ControlEvent::Status(request) => request.respond_text("status response\n".to_string()),
+            ControlEvent::Status(request) => request.respond("status response\n".to_string()),
+            ControlEvent::Pause(_) | ControlEvent::Resume(_) => {
+                panic!("unexpected control command")
+            }
             ControlEvent::Failed(error) => panic!("control worker failed: {error}"),
         }
 
@@ -389,12 +423,15 @@ mod tests {
         assert_eq!(response, "error: unknown control command\n");
 
         let client_path = path.clone();
-        let client = thread::spawn(move || query_status_at(&client_path));
+        let client = thread::spawn(move || send_command_at(&client_path, STATUS_COMMAND));
         let event = events
             .recv()
             .unwrap_or_else(|error| panic!("control event missing: {error}"));
         match event {
-            ControlEvent::Status(request) => request.respond_text("still running\n".to_string()),
+            ControlEvent::Status(request) => request.respond("still running\n".to_string()),
+            ControlEvent::Pause(_) | ControlEvent::Resume(_) => {
+                panic!("unexpected control command")
+            }
             ControlEvent::Failed(error) => panic!("control worker failed: {error}"),
         }
         let follow_up = client
@@ -402,6 +439,34 @@ mod tests {
             .unwrap_or_else(|_| panic!("control client panicked"))
             .unwrap_or_else(|error| panic!("follow-up status failed: {error}"));
         assert_eq!(follow_up, "still running\n");
+        drop(monitor);
+    }
+
+    #[test]
+    fn pause_command_round_trips_through_the_worker() {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("temp dir failed: {error}"));
+        let path = temp.path().join("control.sock");
+        let (monitor, events) = ControlMonitor::connect_at(path.clone())
+            .unwrap_or_else(|error| panic!("control monitor failed: {error}"));
+        let client_path = path.clone();
+        let client = thread::spawn(move || send_command_at(&client_path, PAUSE_COMMAND));
+
+        let event = events
+            .recv()
+            .unwrap_or_else(|error| panic!("control event missing: {error}"));
+        match event {
+            ControlEvent::Pause(request) => request.respond("sweetsidle: paused\n".to_string()),
+            ControlEvent::Status(_) | ControlEvent::Resume(_) => {
+                panic!("unexpected control command")
+            }
+            ControlEvent::Failed(error) => panic!("control worker failed: {error}"),
+        }
+
+        let response = client
+            .join()
+            .unwrap_or_else(|_| panic!("control client panicked"))
+            .unwrap_or_else(|error| panic!("pause request failed: {error}"));
+        assert_eq!(response, "sweetsidle: paused\n");
         drop(monitor);
     }
 

@@ -122,6 +122,12 @@ impl ListenerSet {
         self.mark_active_matching(|listener| listener.inhibit_policy == InhibitPolicy::Respect)
     }
 
+    pub(crate) fn reset(&mut self) {
+        for listener in &mut self.listeners {
+            listener.phase = ListenerPhase::Armed;
+        }
+    }
+
     pub fn inhibit_policy(&self, listener_id: ListenerId) -> Result<InhibitPolicy, ListenerError> {
         self.listeners
             .get(listener_id.index())
@@ -316,6 +322,17 @@ mod tests {
         assert_eq!(status[0].phase, super::ListenerPhase::TimedOut);
         assert_eq!(status[1].phase, super::ListenerPhase::Armed);
         assert_eq!(status[0].inhibit_policy, InhibitPolicy::Ignore);
+    }
+
+    #[test]
+    fn reset_arms_listeners_without_resume_commands() {
+        let mut set = ListenerSet::from_config(&sample_config());
+        let listener = ListenerId::from_index(1);
+        assert!(set.mark_timed_out(listener).is_ok());
+
+        set.reset();
+
+        assert_eq!(set.mark_active(), Vec::<CommandIntent>::new());
     }
 
     #[test]
