@@ -61,7 +61,9 @@ fn register_source(
                     RuntimeSignal::Terminate => {
                         state.request_shutdown(ShutdownSignal::Terminate);
                     }
-                    RuntimeSignal::Reload => state.request_reload(),
+                    RuntimeSignal::Reload => {
+                        state.request_reload();
+                    }
                 }
                 Ok::<PostAction, io::Error>(PostAction::Continue)
             },

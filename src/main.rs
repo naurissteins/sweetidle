@@ -24,6 +24,7 @@ fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
         Action::Status => print_control(control::query_status())?,
         Action::Pause => print_control(control::pause())?,
         Action::Resume => print_control(control::resume())?,
+        Action::Reload => print_control(control::reload())?,
         Action::CheckConfig(path) => check_config_file(path)?,
         Action::Run { path, verbose } => run_daemon(path, verbose)?,
     }
@@ -38,6 +39,7 @@ enum Action {
     Status,
     Pause,
     Resume,
+    Reload,
     CheckConfig(Option<PathBuf>),
     Run {
         path: Option<PathBuf>,
@@ -60,6 +62,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Action, String> 
             "status" => set_control_action(&mut control_action, Action::Status)?,
             "pause" => set_control_action(&mut control_action, Action::Pause)?,
             "resume" => set_control_action(&mut control_action, Action::Resume)?,
+            "reload" => set_control_action(&mut control_action, Action::Reload)?,
             "--check-config" => check_config = true,
             "-c" | "--config" => {
                 let path = args
@@ -110,6 +113,7 @@ Commands:
   status              Show listener and inhibitor state
   pause               Pause idle listeners and the idle hint
   resume              Resume idle detection with fresh timers
+  reload              Reload and validate the active config
 
 Options:
   -c, --config <PATH>  Use a specific config file
@@ -482,6 +486,11 @@ mod tests {
     fn pause_and_resume_select_control_actions() {
         assert_eq!(parse_args(["pause".to_string()]), Ok(Action::Pause));
         assert_eq!(parse_args(["resume".to_string()]), Ok(Action::Resume));
+    }
+
+    #[test]
+    fn reload_selects_the_control_client() {
+        assert_eq!(parse_args(["reload".to_string()]), Ok(Action::Reload));
     }
 
     #[test]

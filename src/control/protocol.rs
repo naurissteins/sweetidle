@@ -9,6 +9,7 @@ pub(crate) enum ControlEvent {
     Status(ControlRequest),
     Pause(ControlRequest),
     Resume(ControlRequest),
+    Reload(ControlRequest),
     Failed(super::ControlError),
 }
 

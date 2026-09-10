@@ -213,12 +213,15 @@ impl RuntimeState {
         self.session_events.push(event);
     }
 
-    pub(super) fn request_reload(&mut self) {
-        if self.reload_pending || self.shutdown.is_some() {
-            return;
+    pub(super) fn request_reload(&mut self) -> ReloadRequestOutcome {
+        if self.shutdown.is_some() {
+            return ReloadRequestOutcome::ShuttingDown;
+        }
+        if self.reload_pending {
+            return ReloadRequestOutcome::AlreadyPending;
         }
         let Some(requester) = self.reload_requester.as_ref() else {
-            return;
+            return ReloadRequestOutcome::Unavailable;
         };
 
         match requester.request() {
@@ -226,8 +229,12 @@ impl RuntimeState {
                 self.reload_pending = true;
                 self.runtime_events
                     .push(RuntimeEvent::ConfigReloadRequested);
+                ReloadRequestOutcome::Requested
             }
-            Err(_) => self.reload_request_failed = true,
+            Err(_) => {
+                self.reload_request_failed = true;
+                ReloadRequestOutcome::Failed
+            }
         }
     }
 
@@ -306,6 +313,26 @@ impl RuntimeState {
                         "sweetsidle: already running\n".to_string()
                     });
                 }
+                ControlEvent::Reload(request) => match self.request_reload() {
+                    ReloadRequestOutcome::Requested => {
+                        request.respond("sweetsidle: reload requested\n".to_string());
+                    }
+                    ReloadRequestOutcome::AlreadyPending => {
+                        request.respond("sweetsidle: reload already pending\n".to_string());
+                    }
+                    ReloadRequestOutcome::Unavailable => {
+                        request.respond(
+                            "error: configuration reload is unavailable without a config path\n"
+                                .to_string(),
+                        );
+                    }
+                    ReloadRequestOutcome::ShuttingDown => {
+                        request.respond("error: sweetsidle is shutting down\n".to_string());
+                    }
+                    ReloadRequestOutcome::Failed => {
+                        return Err(RuntimeError::ReloadRequestChannelClosed);
+                    }
+                },
                 ControlEvent::Failed(error) => return Err(RuntimeError::Control(error)),
             }
         }
@@ -667,6 +694,15 @@ struct SessionCommandIntent {
     inhibitor: Option<DelayInhibitor>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReloadRequestOutcome {
+    Requested,
+    AlreadyPending,
+    Unavailable,
+    ShuttingDown,
+    Failed,
+}
+
 fn register_process_monitor(
     handle: &LoopHandle<'static, RuntimeState>,
     start: ProcessStart,
@@ -706,7 +742,7 @@ mod tests {
 
     use calloop::EventLoop;
 
-    use super::{ConfigReloadEvent, RuntimeState, SessionCommandIntent};
+    use super::{ConfigReloadEvent, ReloadRequestOutcome, RuntimeState, SessionCommandIntent};
     use crate::{
         command::CommandContext,
         config::{Config, GeneralConfig, ListenerConfig},
@@ -1184,6 +1220,28 @@ mod tests {
             state.take_runtime_events().as_slice(),
             [RuntimeEvent::ConfigReloadRejected(_)]
         ));
+    }
+
+    #[test]
+    fn reload_control_reports_when_no_config_path_is_available() {
+        let mut state = runtime_state();
+        let (reply, response) = mpsc::sync_channel(1);
+        state.record_control_event(ControlEvent::Reload(ControlRequest::new(reply)));
+
+        assert_runtime_ok(state.route_control_events());
+
+        assert_eq!(
+            response.recv(),
+            Ok("error: configuration reload is unavailable without a config path\n".to_string())
+        );
+    }
+
+    #[test]
+    fn reload_request_reports_an_existing_pending_request() {
+        let mut state = runtime_state();
+        state.reload_pending = true;
+
+        assert_eq!(state.request_reload(), ReloadRequestOutcome::AlreadyPending);
     }
 
     #[test]
