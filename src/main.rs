@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use sweetsidle::{
     command::ProcessError,
     config::Config,
+    control,
     runtime::{ConfigReloadOutcome, IdleRuntime, RuntimeEvent},
 };
 use tracing::{debug, error, info, warn};
@@ -20,6 +21,7 @@ fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
     match parse_args(args)? {
         Action::Help => print_help(),
         Action::Version => println!("sweetsidle {VERSION}"),
+        Action::Status => print_status()?,
         Action::CheckConfig(path) => check_config_file(path)?,
         Action::Run { path, verbose } => run_daemon(path, verbose)?,
     }
@@ -31,6 +33,7 @@ fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
 enum Action {
     Help,
     Version,
+    Status,
     CheckConfig(Option<PathBuf>),
     Run {
         path: Option<PathBuf>,
@@ -42,6 +45,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Action, String> 
     let mut check_config = false;
     let mut config_path = None;
     let mut verbose = false;
+    let mut status = false;
     let mut args = args.into_iter();
 
     while let Some(arg) = args.next() {
@@ -49,6 +53,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Action, String> 
             "-h" | "--help" => return Ok(Action::Help),
             "-V" | "--version" => return Ok(Action::Version),
             "-v" | "--verbose" => verbose = true,
+            "status" => status = true,
             "--check-config" => check_config = true,
             "-c" | "--config" => {
                 let path = args
@@ -60,7 +65,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Action, String> 
         }
     }
 
-    if check_config {
+    if status {
+        if check_config || verbose || config_path.is_some() {
+            return Err("`status` cannot be combined with daemon or config options".to_string());
+        }
+        Ok(Action::Status)
+    } else if check_config {
         if verbose {
             return Err("`--verbose` cannot be used with `--check-config`".to_string());
         }
@@ -79,6 +89,10 @@ fn print_help() {
 sweetsidle {VERSION}
 
 Usage: sweetsidle [OPTIONS]
+       sweetsidle status
+
+Commands:
+  status              Show listener and inhibitor state
 
 Options:
   -c, --config <PATH>  Use a specific config file
@@ -88,6 +102,12 @@ Options:
   -V, --version        Print version
 "
     );
+}
+
+fn print_status() -> Result<(), String> {
+    let status = control::query_status().map_err(|error| error.to_string())?;
+    print!("{status}");
+    Ok(())
 }
 
 fn check_config_file(path: Option<PathBuf>) -> Result<(), String> {
@@ -418,6 +438,19 @@ mod tests {
                 "idle.toml".to_string(),
             ]),
             Ok(Action::CheckConfig(Some(PathBuf::from("idle.toml"))))
+        );
+    }
+
+    #[test]
+    fn status_selects_the_control_client() {
+        assert_eq!(parse_args(["status".to_string()]), Ok(Action::Status));
+    }
+
+    #[test]
+    fn status_rejects_daemon_options() {
+        assert_eq!(
+            parse_args(["status".to_string(), "--verbose".to_string()]),
+            Err("`status` cannot be combined with daemon or config options".to_string())
         );
     }
 }

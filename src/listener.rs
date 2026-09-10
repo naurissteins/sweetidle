@@ -28,6 +28,14 @@ pub enum InhibitPolicy {
     Ignore,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ListenerStatus {
+    pub(crate) listener_id: ListenerId,
+    pub(crate) timeout: Duration,
+    pub(crate) inhibit_policy: InhibitPolicy,
+    pub(crate) phase: ListenerPhase,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandIntent {
     pub listener_id: ListenerId,
@@ -121,6 +129,19 @@ impl ListenerSet {
             .ok_or(ListenerError::UnknownListener(listener_id))
     }
 
+    pub(crate) fn status(&self) -> Vec<ListenerStatus> {
+        self.listeners
+            .iter()
+            .enumerate()
+            .map(|(index, listener)| ListenerStatus {
+                listener_id: ListenerId(index),
+                timeout: listener.timeout,
+                inhibit_policy: listener.inhibit_policy,
+                phase: listener.phase,
+            })
+            .collect()
+    }
+
     fn mark_active_matching(
         &mut self,
         mut matches: impl FnMut(&ListenerState) -> bool,
@@ -165,7 +186,7 @@ struct ListenerState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ListenerPhase {
+pub(crate) enum ListenerPhase {
     Armed,
     TimedOut,
 }
@@ -283,6 +304,18 @@ mod tests {
             set.mark_timed_out(ListenerId(99)),
             Err(ListenerError::UnknownListener(ListenerId(99)))
         );
+    }
+
+    #[test]
+    fn reports_current_listener_status() {
+        let mut set = ListenerSet::from_config(&sample_config());
+        assert!(set.mark_timed_out(ListenerId(0)).is_ok());
+
+        let status = set.status();
+
+        assert_eq!(status[0].phase, super::ListenerPhase::TimedOut);
+        assert_eq!(status[1].phase, super::ListenerPhase::Armed);
+        assert_eq!(status[0].inhibit_policy, InhibitPolicy::Ignore);
     }
 
     #[test]

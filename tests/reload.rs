@@ -55,13 +55,28 @@ fn invalid_sighup_keeps_the_last_valid_config_active() -> Result<(), Box<dyn Err
     Ok(())
 }
 
+#[test]
+#[ignore = "runs the real daemon against a private Wayland compositor"]
+fn status_reports_live_listener_state() -> Result<(), Box<dyn Error>> {
+    let mut harness = ReloadHarness::start("status")?;
+    harness.wait_for_markers(1)?;
+
+    let status = harness.status()?;
+
+    assert!(status.contains("sweetsidle: running"));
+    assert!(status.contains("id=0 state=timed-out timeout=3600s inhibitors=ignored"));
+    assert!(status.contains("tracked inhibitors: none"));
+    harness.stop()?;
+    Ok(())
+}
+
 struct ReloadHarness {
     config_path: std::path::PathBuf,
     marker_path: std::path::PathBuf,
     log_path: std::path::PathBuf,
     daemon: TestDaemon,
     compositor: MockCompositor,
-    _temp_dir: TempDir,
+    temp_dir: TempDir,
 }
 
 impl ReloadHarness {
@@ -90,7 +105,7 @@ impl ReloadHarness {
             log_path,
             daemon: TestDaemon::new(child),
             compositor,
-            _temp_dir: temp_dir,
+            temp_dir,
         })
     }
 
@@ -120,6 +135,22 @@ impl ReloadHarness {
 
     fn markers(&self) -> Result<Vec<String>, Box<dyn Error>> {
         marker_lines(&self.marker_path)
+    }
+
+    fn status(&mut self) -> Result<String, Box<dyn Error>> {
+        let output = Command::new(env!("CARGO_BIN_EXE_sweetsidle"))
+            .arg("status")
+            .env("XDG_RUNTIME_DIR", self.temp_dir.path())
+            .output()?;
+        if !output.status.success() {
+            return Err(format!(
+                "status command failed with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        Ok(String::from_utf8(output.stdout)?)
     }
 
     fn stop(mut self) -> Result<(), Box<dyn Error>> {

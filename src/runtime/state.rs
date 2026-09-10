@@ -17,8 +17,11 @@ use crate::{
         ProcessStart, SkipReason,
     },
     config::Config,
+    control::{ControlEvent, DbusInhibitorStatus, StatusSnapshot},
     listener::{CommandIntent, InhibitPolicy, ListenerSet},
-    session::{DbusInhibitEvent, DelayInhibitor, SessionEvent},
+    session::{
+        DbusInhibitEvent, DelayInhibitor, InhibitorInfo, SessionEvent, SystemdIdleInhibitor,
+    },
     wayland::{IdleEvent, IdleWaylandState},
 };
 
@@ -35,6 +38,8 @@ pub(super) struct RuntimeState {
     session_channel_closed: bool,
     dbus_inhibit_events: Vec<DbusInhibitEvent>,
     dbus_inhibit_channel_closed: bool,
+    control_events: Vec<ControlEvent>,
+    control_channel_closed: bool,
     reload_requester: Option<ConfigReloadRequester>,
     reload_events: Vec<ConfigReloadEvent>,
     reload_request_failed: bool,
@@ -42,6 +47,8 @@ pub(super) struct RuntimeState {
     reload_pending: bool,
     active_dbus_inhibitors: usize,
     active_systemd_inhibitors: usize,
+    active_dbus_inhibitor_details: HashMap<u32, InhibitorInfo>,
+    active_systemd_inhibitor_details: Vec<SystemdIdleInhibitor>,
     idle_hint_state: Option<bool>,
     idle_hint_updates: Vec<bool>,
     preparing_for_sleep: bool,
@@ -74,6 +81,8 @@ impl RuntimeState {
             session_channel_closed: false,
             dbus_inhibit_events: Vec::new(),
             dbus_inhibit_channel_closed: false,
+            control_events: Vec::new(),
+            control_channel_closed: false,
             reload_requester,
             reload_events: Vec::new(),
             reload_request_failed: false,
@@ -81,6 +90,8 @@ impl RuntimeState {
             reload_pending: false,
             active_dbus_inhibitors: 0,
             active_systemd_inhibitors: 0,
+            active_dbus_inhibitor_details: HashMap::new(),
+            active_systemd_inhibitor_details: Vec::new(),
             idle_hint_state: config.idle_hint_timeout_seconds.map(|_| false),
             idle_hint_updates: Vec::new(),
             preparing_for_sleep: false,
@@ -255,6 +266,28 @@ impl RuntimeState {
         self.dbus_inhibit_channel_closed = true;
     }
 
+    pub(super) fn record_control_event(&mut self, event: ControlEvent) {
+        self.control_events.push(event);
+    }
+
+    pub(super) fn mark_control_channel_closed(&mut self) {
+        self.control_channel_closed = true;
+    }
+
+    pub(super) fn route_control_events(&mut self) -> Result<(), RuntimeError> {
+        for event in std::mem::take(&mut self.control_events) {
+            match event {
+                ControlEvent::Status(request) => request.respond(&self.status_snapshot()),
+                ControlEvent::Failed(error) => return Err(RuntimeError::Control(error)),
+            }
+        }
+
+        if self.control_channel_closed {
+            return Err(RuntimeError::ControlChannelClosed);
+        }
+        Ok(())
+    }
+
     pub(super) fn route_dbus_inhibit_events(&mut self) -> Result<(), RuntimeError> {
         for event in std::mem::take(&mut self.dbus_inhibit_events) {
             match event {
@@ -262,6 +295,8 @@ impl RuntimeState {
                     inhibitor,
                     active_count,
                 } => {
+                    self.active_dbus_inhibitor_details
+                        .insert(inhibitor.cookie, inhibitor.clone());
                     self.update_dbus_inhibit_count(active_count)?;
                     self.runtime_events.push(RuntimeEvent::DbusInhibitorAdded {
                         cookie: inhibitor.cookie,
@@ -274,6 +309,7 @@ impl RuntimeState {
                     inhibitor,
                     active_count,
                 } => {
+                    self.active_dbus_inhibitor_details.remove(&inhibitor.cookie);
                     self.update_dbus_inhibit_count(active_count)?;
                     self.runtime_events
                         .push(RuntimeEvent::DbusInhibitorRemoved {
@@ -288,6 +324,8 @@ impl RuntimeState {
                     released_count,
                     active_count,
                 } => {
+                    self.active_dbus_inhibitor_details
+                        .retain(|_, inhibitor| inhibitor.owner != owner);
                     self.update_dbus_inhibit_count(active_count)?;
                     self.runtime_events
                         .push(RuntimeEvent::DbusInhibitorOwnerDisconnected {
@@ -361,6 +399,7 @@ impl RuntimeState {
                 }
                 SessionEvent::SystemdIdleInhibitorsChanged(inhibitors) => {
                     let active_count = inhibitors.len();
+                    self.active_systemd_inhibitor_details = inhibitors.clone();
                     self.update_systemd_inhibit_count(active_count)?;
                     self.runtime_events
                         .push(RuntimeEvent::SystemdIdleInhibitorsChanged {
@@ -383,6 +422,7 @@ impl RuntimeState {
         self.wayland.take_events();
         self.session_events.clear();
         self.dbus_inhibit_events.clear();
+        self.control_events.clear();
         self.reload_events.clear();
         self.command_intents.clear();
         self.session_command_intents.clear();
@@ -458,6 +498,26 @@ impl RuntimeState {
 
     fn idle_inhibited(&self) -> bool {
         self.active_dbus_inhibitors > 0 || self.active_systemd_inhibitors > 0
+    }
+
+    fn status_snapshot(&self) -> StatusSnapshot {
+        let mut dbus_inhibitors = self
+            .active_dbus_inhibitor_details
+            .values()
+            .map(|inhibitor| DbusInhibitorStatus {
+                cookie: inhibitor.cookie,
+                application: inhibitor.application.clone(),
+                reason: inhibitor.reason.clone(),
+            })
+            .collect::<Vec<_>>();
+        dbus_inhibitors.sort_unstable_by_key(|inhibitor| inhibitor.cookie);
+
+        StatusSnapshot {
+            listeners: self.listeners.status(),
+            dbus_inhibitors,
+            systemd_inhibitors: self.active_systemd_inhibitor_details.clone(),
+            idle_hint: self.idle_hint_state,
+        }
     }
 
     fn apply_idle_inhibition_transition(
@@ -847,6 +907,27 @@ mod tests {
             state.command_intents,
             vec![intent(0, CommandKind::Resume, "unlock")]
         );
+    }
+
+    #[test]
+    fn status_snapshot_contains_live_listener_and_inhibitor_state() {
+        let mut state = runtime_state_with_ignored_listener();
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(0))));
+        state.record_dbus_inhibit_event(DbusInhibitEvent::Added {
+            inhibitor: inhibitor_info(7),
+            active_count: 1,
+        });
+        assert_runtime_ok(state.route_dbus_inhibit_events());
+        state.record_session_event(SessionEvent::SystemdIdleInhibitorsChanged(vec![
+            systemd_inhibitor(42),
+        ]));
+        assert_runtime_ok(state.route_session_events());
+
+        let status = state.status_snapshot().to_string();
+
+        assert!(status.contains("id=0 state=timed-out timeout=300s inhibitors=ignored"));
+        assert!(status.contains("source=dbus cookie=7 application=\"test application\""));
+        assert!(status.contains("source=systemd pid=42 uid=1000 who=\"test application\""));
     }
 
     #[test]
