@@ -74,6 +74,26 @@ fn oversized_timeout_sighup_keeps_the_last_valid_config_active() -> Result<(), B
 
 #[test]
 #[ignore = "runs the real daemon against a private Wayland compositor"]
+fn unsupported_input_idle_sighup_keeps_the_last_valid_config_active() -> Result<(), Box<dyn Error>>
+{
+    let mut harness = ReloadHarness::start_with_notifier_version("active", 1)?;
+    harness.wait_for_markers(1)?;
+
+    harness.write_config("rejected")?;
+    harness.signal_reload()?;
+    harness.wait_for_log("configuration reload rejected")?;
+    harness.compositor.pulse()?;
+    harness.wait_for_markers(2)?;
+
+    assert_eq!(harness.markers()?, ["active", "active"]);
+    let status: serde_json::Value = serde_json::from_str(&harness.status_json()?)?;
+    assert_eq!(status["listeners"][0]["ignore_inhibit"], false);
+    harness.stop()?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "runs the real daemon against a private Wayland compositor"]
 fn status_reports_live_listener_state() -> Result<(), Box<dyn Error>> {
     let mut harness = ReloadHarness::start("status")?;
     harness.wait_for_markers(1)?;
@@ -141,13 +161,25 @@ struct ReloadHarness {
 
 impl ReloadHarness {
     fn start(initial_marker: &str) -> Result<Self, Box<dyn Error>> {
+        Self::start_with_notifier_version(initial_marker, 2)
+    }
+
+    fn start_with_notifier_version(
+        initial_marker: &str,
+        notifier_version: u32,
+    ) -> Result<Self, Box<dyn Error>> {
         let temp_dir = tempfile::tempdir()?;
         let config_path = temp_dir.path().join("config.toml");
         let marker_path = temp_dir.path().join("commands.log");
         let log_path = temp_dir.path().join("daemon.log");
         let socket_path = temp_dir.path().join("wayland-test");
-        let compositor = MockCompositor::start(socket_path.clone())?;
-        write_config(&config_path, &marker_path, initial_marker)?;
+        let compositor = MockCompositor::start(socket_path.clone(), notifier_version)?;
+        write_config_with_policy(
+            &config_path,
+            &marker_path,
+            initial_marker,
+            notifier_version >= 2,
+        )?;
 
         let log = File::create(&log_path)?;
         let log_stdout = log.try_clone()?;
@@ -238,11 +270,20 @@ fn write_config(
     marker_path: &std::path::Path,
     marker: &str,
 ) -> Result<(), Box<dyn Error>> {
+    write_config_with_policy(config_path, marker_path, marker, true)
+}
+
+fn write_config_with_policy(
+    config_path: &std::path::Path,
+    marker_path: &std::path::Path,
+    marker: &str,
+    ignore_inhibit: bool,
+) -> Result<(), Box<dyn Error>> {
     let marker_path = shell_quote(path_text(marker_path)?);
     let command = format!("printf '%s\\n' {marker} >> {marker_path}");
     let command = command.replace('\\', "\\\\").replace('"', "\\\"");
     let config = format!(
-        "[general]\nignore_dbus_inhibit = true\nignore_systemd_inhibit = true\n\n[[listener]]\ntimeout = 3600\non_timeout = \"{command}\"\nignore_inhibit = true\n"
+        "[general]\nignore_dbus_inhibit = true\nignore_systemd_inhibit = true\n\n[[listener]]\ntimeout = 3600\non_timeout = \"{command}\"\nignore_inhibit = {ignore_inhibit}\n"
     );
     fs::write(config_path, config)?;
     Ok(())
@@ -345,12 +386,15 @@ struct MockCompositor {
 }
 
 impl MockCompositor {
-    fn start(socket_path: std::path::PathBuf) -> Result<Self, Box<dyn Error>> {
+    fn start(
+        socket_path: std::path::PathBuf,
+        notifier_version: u32,
+    ) -> Result<Self, Box<dyn Error>> {
         let socket = ListeningSocket::bind_absolute(socket_path)?;
         let mut display = Display::<MockState>::new()?;
         let handle = display.handle();
         handle.create_global::<MockState, wl_seat::WlSeat, _>(1, ());
-        handle.create_global::<MockState, ExtIdleNotifierV1, _>(2, ());
+        handle.create_global::<MockState, ExtIdleNotifierV1, _>(notifier_version, ());
         let (commands, receiver) = mpsc::channel();
         let thread = thread::Builder::new()
             .name("sweetsidle-test-wayland".to_string())

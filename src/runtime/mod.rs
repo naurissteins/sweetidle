@@ -22,7 +22,7 @@ use crate::{
     control::ControlMonitor,
     listener::ListenerSet,
     session::{DbusInhibitMonitor, LogindFeatures, LogindMonitor, SystemdIdleInhibitor},
-    wayland::IdleWaylandConnection,
+    wayland::{IdleWaylandConnection, IdleWaylandError},
 };
 
 #[derive(Debug)]
@@ -78,9 +78,10 @@ pub enum RuntimeEvent {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum ConfigReloadOutcome {
     Applied,
+    Rejected(IdleWaylandError),
     RestartRequired(&'static str),
 }
 
@@ -171,6 +172,14 @@ impl IdleRuntime {
         let candidate_features = IntegrationFeatures::from_config(candidate);
         if let Some(reason) = reload_restart_reason(self.integration_features, candidate_features) {
             return Ok(ConfigReloadOutcome::RestartRequired(reason));
+        }
+
+        let listeners = ListenerSet::from_config(candidate);
+        if let Err(error) = self.state.wayland.validate_notifications(
+            &listeners.timeout_requests(),
+            candidate.idle_hint_timeout_seconds.map(Duration::from_secs),
+        ) {
+            return Ok(ConfigReloadOutcome::Rejected(error));
         }
 
         self.state.apply_config(candidate)?;
