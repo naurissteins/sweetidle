@@ -1,3 +1,4 @@
+// share the same control protocol between the client and daemon
 mod error;
 mod protocol;
 mod socket;

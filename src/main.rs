@@ -178,6 +178,7 @@ fn run_daemon(path: Option<PathBuf>, verbose: bool) -> Result<(), String> {
         "sweetsidle started"
     );
 
+    // the runtime blocks until an event wakes this loop
     loop {
         let events = runtime.dispatch(None).map_err(|error| error.to_string())?;
         let mut shutdown = false;
@@ -204,6 +205,7 @@ fn run_daemon(path: Option<PathBuf>, verbose: bool) -> Result<(), String> {
             continue;
         }
 
+        // keep the active config until the runtime accepts the candidate
         match runtime
             .reload_config(&candidate)
             .map_err(|error| error.to_string())?

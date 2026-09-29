@@ -11,6 +11,7 @@ pub struct SystemdIdleInhibitor {
 }
 
 pub(crate) fn idle_block_inhibitors(inhibitors: Vec<LogindInhibitor>) -> Vec<SystemdIdleInhibitor> {
+    // logind lists several operations in one colon separated field
     let mut inhibitors = inhibitors
         .into_iter()
         .filter_map(|(what, who, why, mode, uid, pid)| {
@@ -24,6 +25,7 @@ pub(crate) fn idle_block_inhibitors(inhibitors: Vec<LogindInhibitor>) -> Vec<Sys
             })
         })
         .collect::<Vec<_>>();
+    // deterministic ordering keeps status snapshots easy to compare
     inhibitors.sort_unstable();
     inhibitors
 }

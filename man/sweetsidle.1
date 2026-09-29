@@ -184,6 +184,8 @@ contains
 A listener with
 .B ignore_inhibit = true
 bypasses all three sources.
+ScreenSaver inhibitors are released when their D-Bus client disconnects,
+including during an Inhibit call.
 .PP
 The
 .B status

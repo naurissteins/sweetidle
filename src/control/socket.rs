@@ -158,6 +158,7 @@ fn bind_socket(path: &Path) -> Result<UnixListener, ControlError> {
 }
 
 fn replace_stale_socket(path: &Path) -> Result<(), ControlError> {
+    // only a refused connection proves an existing socket has no listener
     match UnixStream::connect(path) {
         Ok(_) => return Err(ControlError::AlreadyRunning(path.to_path_buf())),
         Err(source) if source.kind() == io::ErrorKind::ConnectionRefused => {}
@@ -199,6 +200,7 @@ fn run_worker(
     events: EventSender<ControlEvent>,
     shutdown: UnixStream,
 ) {
+    // poll shutdown and clients together so monitor drop can stop this thread
     loop {
         let mut poll_fds = [
             PollFd::new(&listener, PollFlags::IN),
@@ -247,6 +249,7 @@ fn handle_client(
     stream: &mut UnixStream,
     events: &EventSender<ControlEvent>,
 ) -> Result<(), ClientRequestError> {
+    // bound each exchange so a client cannot hold the worker indefinitely
     stream
         .set_read_timeout(Some(IO_TIMEOUT))
         .map_err(ClientRequestError::Io)?;

@@ -1,4 +1,5 @@
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+// one typed shape feeds listeners and runtime setup
 pub struct Config {
     pub general: GeneralConfig,
     pub idle_hint_timeout_seconds: Option<u64>,
@@ -18,6 +19,7 @@ pub struct GeneralConfig {
 
 impl Default for GeneralConfig {
     fn default() -> Self {
+        // sleep hooks wait by default so locking can finish before suspend
         Self {
             lock_command: None,
             unlock_command: None,

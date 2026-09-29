@@ -1,3 +1,4 @@
+// keep D-Bus service state separate from logind session monitoring
 mod inhibit;
 mod logind;
 mod screensaver;

@@ -1,3 +1,4 @@
+// keep platform adapters separate from listener and configuration policy
 pub mod command;
 pub mod config;
 pub mod control;

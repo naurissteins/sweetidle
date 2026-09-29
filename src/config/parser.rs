@@ -4,6 +4,7 @@ use serde::Deserialize;
 
 use super::{Config, GeneralConfig, ListenerConfig};
 
+// idle notify timeouts are encoded as milliseconds in a u32
 const MAX_TIMEOUT_SECONDS: u64 = u32::MAX as u64 / 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +55,7 @@ impl fmt::Display for ConfigError {
 
 impl Error for ConfigError {}
 
+// unknown tables fail before any runtime configuration is built
 #[derive(Debug, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 struct ConfigDocument {

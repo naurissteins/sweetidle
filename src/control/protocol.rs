@@ -33,6 +33,7 @@ impl ControlRequest {
     }
 
     pub(crate) fn respond(self, response: String) {
+        // the worker may have timed out and dropped its reply receiver
         let _ = self.reply.try_send(response);
     }
 }
@@ -94,6 +95,7 @@ impl StatusSnapshot {
                 why: &inhibitor.why,
             })
             .collect();
+        // pin the wire format to a version before serializing it
         let status = JsonStatus {
             schema_version: 1,
             paused: self.paused,

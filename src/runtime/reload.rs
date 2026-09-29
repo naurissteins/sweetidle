@@ -72,6 +72,7 @@ fn run_worker(
     requests: &Receiver<WorkerRequest>,
     events: &EventSender<ConfigReloadEvent>,
 ) {
+    // parse on the worker so reload cannot stall event dispatch
     while let Ok(request) = requests.recv() {
         match request {
             WorkerRequest::Reload => {

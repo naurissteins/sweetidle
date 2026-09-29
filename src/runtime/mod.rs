@@ -143,6 +143,7 @@ impl IdleRuntime {
         &mut self,
         timeout: Option<Duration>,
     ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+        // route inhibitor changes before idle events from the same wakeup
         self.event_loop
             .dispatch(timeout, &mut self.state)
             .map_err(RuntimeError::Dispatch)?;
@@ -169,6 +170,7 @@ impl IdleRuntime {
         &mut self,
         candidate: &Config,
     ) -> Result<ConfigReloadOutcome, RuntimeError> {
+        // changing integration workers needs a full restart
         let candidate_features = IntegrationFeatures::from_config(candidate);
         if let Some(reason) = reload_restart_reason(self.integration_features, candidate_features) {
             return Ok(ConfigReloadOutcome::RestartRequired(reason));

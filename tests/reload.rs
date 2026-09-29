@@ -21,6 +21,7 @@ use wayland_server::{
     Resource, backend::ClientId, protocol::wl_seat,
 };
 
+// each case runs the daemon against a private compositor and runtime dir
 const WAIT_LIMIT: Duration = Duration::from_secs(5);
 
 #[test]
@@ -311,6 +312,7 @@ fn wait_until(
     log_path: &std::path::Path,
     mut ready: impl FnMut() -> bool,
 ) -> Result<(), Box<dyn Error>> {
+    // include daemon logs when a readiness check fails or times out
     let deadline = Instant::now() + WAIT_LIMIT;
     while Instant::now() < deadline {
         if ready() {

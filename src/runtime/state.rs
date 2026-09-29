@@ -160,6 +160,7 @@ impl RuntimeState {
     }
 
     pub(super) fn collect_ready_processes(&mut self) -> Result<(), RuntimeError> {
+        // children may finish before their pidfd source is registered
         let ready = std::mem::take(&mut self.ready_processes);
         if ready.is_empty() {
             return Ok(());
@@ -569,6 +570,7 @@ impl RuntimeState {
         &mut self,
         was_inhibited: bool,
     ) -> Result<(), RuntimeError> {
+        // a change in inhibitor presence rearms Wayland notifications
         let is_inhibited = self.idle_inhibited();
 
         if was_inhibited == is_inhibited || self.paused {

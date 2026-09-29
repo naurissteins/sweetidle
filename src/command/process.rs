@@ -45,6 +45,7 @@ pub enum ProcessError {
 
 impl ProcessAdapter {
     pub fn spawn(&mut self, request: SpawnRequest) -> Result<ProcessStart, ProcessError> {
+        // configured commands use the shell and discard standard streams
         let child = Command::new("sh")
             .arg("-c")
             .arg(&request.command)
@@ -73,6 +74,7 @@ impl ProcessAdapter {
     }
 
     pub fn collect_finished(&mut self) -> Result<Vec<ProcessCompletion>, ProcessError> {
+        // try_wait reaps children without blocking the event loop
         let mut finished = Vec::new();
         let mut index = 0;
 

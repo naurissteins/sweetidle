@@ -168,13 +168,16 @@ struct SharedState {
 #[zbus::interface(name = "org.freedesktop.ScreenSaver")]
 impl ScreenSaverService {
     #[zbus(name = "Inhibit")]
-    fn inhibit(
+    async fn inhibit(
         &self,
         application_name: &str,
         reason_for_inhibit: &str,
         #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
     ) -> fdo::Result<u32> {
         let owner = caller(&header)?;
+        let owner_name = zbus::names::BusName::try_from(owner.as_str())
+            .map_err(|_| fdo::Error::Failed("invalid D-Bus caller name".to_string()))?;
         let cookie = {
             let mut registry = self.shared.registry.lock().map_err(state_unavailable)?;
             let inhibitor = registry
@@ -199,7 +202,18 @@ impl ScreenSaverService {
             cookie
         };
 
-        Ok(cookie)
+        // the disconnect signal can arrive before this method inserts the cookie
+        let owner_check = match DBusProxy::new(connection).await {
+            Ok(bus) => bus.name_has_owner(owner_name).await,
+            Err(error) => Err(fdo::Error::ZBus(error)),
+        };
+        let failure = match owner_check {
+            Ok(true) => return Ok(cookie),
+            Ok(false) => "D-Bus caller disconnected during Inhibit".to_string(),
+            Err(error) => format!("failed to verify D-Bus caller during Inhibit: {error}"),
+        };
+        remove_cookie(&self.shared, cookie, &owner)?;
+        Err(fdo::Error::Failed(failure))
     }
 
     #[zbus(name = "UnInhibit")]
@@ -217,6 +231,21 @@ impl ScreenSaverService {
 
         Ok(())
     }
+}
+
+fn remove_cookie(shared: &SharedState, cookie: u32, owner: &str) -> fdo::Result<()> {
+    let mut registry = shared.registry.lock().map_err(state_unavailable)?;
+    let inhibitor = match registry.remove(cookie, owner) {
+        Ok(inhibitor) => inhibitor,
+        Err(InhibitorRegistryError::UnknownCookie) => return Ok(()),
+        Err(error) => return Err(registry_error(error)),
+    };
+    let _ = shared.events.send(DbusInhibitEvent::Removed {
+        inhibitor,
+        active_count: registry.len(),
+    });
+
+    Ok(())
 }
 
 fn run_worker(
@@ -268,6 +297,7 @@ async fn worker_loop(
             );
         }
     };
+    // subscribe before owning the name to observe early client exits
     let mut owner_changes = match bus.receive_name_owner_changed().await {
         Ok(stream) => stream,
         Err(source) => {
@@ -372,7 +402,11 @@ enum WorkerInput<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc::TryRecvError, thread, time::Duration};
+    use std::{
+        sync::mpsc::TryRecvError,
+        thread,
+        time::{Duration, Instant},
+    };
 
     use super::{DbusInhibitEvent, DbusInhibitMonitor};
 
@@ -455,6 +489,68 @@ mod tests {
             }
         ));
 
+        drop(monitor);
+    }
+
+    #[test]
+    #[ignore = "requires a private D-Bus session"]
+    fn rapid_client_disconnects_leave_no_inhibitors() {
+        const CLIENTS: usize = 500;
+        let (monitor, events) = connect_monitor();
+
+        async_io::block_on(async {
+            for _ in 0..CLIENTS {
+                let connection = connect_client().await;
+                let proxy = zbus::Proxy::new(
+                    &connection,
+                    super::SERVICE_NAME,
+                    super::OBJECT_PATH,
+                    super::SERVICE_NAME,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("failed to create client proxy: {error}"));
+                proxy
+                    .call_noreply("Inhibit", &("test.video", "playing media"))
+                    .await
+                    .unwrap_or_else(|error| panic!("failed to send inhibitor request: {error}"));
+                drop(proxy);
+                connection
+                    .close()
+                    .await
+                    .unwrap_or_else(|error| panic!("failed to disconnect client: {error}"));
+            }
+        });
+
+        let mut added = 0;
+        let mut active_count = 0;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while (added < CLIENTS || active_count != 0) && Instant::now() < deadline {
+            match events.try_recv() {
+                Ok(DbusInhibitEvent::Added {
+                    active_count: count,
+                    ..
+                }) => {
+                    added += 1;
+                    active_count = count;
+                }
+                Ok(DbusInhibitEvent::Removed {
+                    active_count: count,
+                    ..
+                })
+                | Ok(DbusInhibitEvent::OwnerDisconnected {
+                    active_count: count,
+                    ..
+                }) => {
+                    active_count = count;
+                }
+                Ok(DbusInhibitEvent::Failed(error)) => panic!("D-Bus service failed: {error}"),
+                Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(10)),
+                Err(TryRecvError::Disconnected) => panic!("D-Bus inhibitor channel closed"),
+            }
+        }
+
+        assert_eq!(added, CLIENTS);
+        assert_eq!(active_count, 0);
         drop(monitor);
     }
 
