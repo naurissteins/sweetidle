@@ -18,6 +18,7 @@ use super::inhibit::{InhibitorInfo, InhibitorRegistry, InhibitorRegistryError};
 
 const SERVICE_NAME: &str = "org.freedesktop.ScreenSaver";
 const OBJECT_PATH: &str = "/org/freedesktop/ScreenSaver";
+const LEGACY_OBJECT_PATH: &str = "/ScreenSaver";
 
 #[derive(Debug)]
 pub(crate) enum DbusInhibitEvent {
@@ -273,20 +274,22 @@ async fn worker_loop(
         registry: Mutex::new(InhibitorRegistry::default()),
         events,
     });
-    if let Err(source) = connection
-        .object_server()
-        .at(
-            OBJECT_PATH,
-            ScreenSaverService {
-                shared: shared.clone(),
-            },
-        )
-        .await
-    {
-        return report_initialization_error(
-            ready,
-            DbusInhibitError::RegisterObject(Box::new(source)),
-        );
+    for path in [OBJECT_PATH, LEGACY_OBJECT_PATH] {
+        if let Err(source) = connection
+            .object_server()
+            .at(
+                path,
+                ScreenSaverService {
+                    shared: shared.clone(),
+                },
+            )
+            .await
+        {
+            return report_initialization_error(
+                ready,
+                DbusInhibitError::RegisterObject(Box::new(source)),
+            );
+        }
     }
     let bus = match DBusProxy::new(&connection).await {
         Ok(proxy) => proxy,
@@ -447,6 +450,73 @@ mod tests {
             if let Err(error) = proxy.un_inhibit(cookie).await {
                 panic!("failed to release idle inhibitor: {error}");
             }
+            assert!(matches!(
+                events.recv(),
+                Ok(DbusInhibitEvent::Removed {
+                    inhibitor,
+                    active_count: 0,
+                }) if inhibitor.cookie == cookie
+            ));
+        });
+
+        drop(monitor);
+    }
+
+    #[test]
+    #[ignore = "requires a private D-Bus session"]
+    fn both_object_paths_share_inhibitor_cookies() {
+        let (monitor, events) = connect_monitor();
+
+        async_io::block_on(async {
+            let connection = connect_client().await;
+            let standard = build_proxy(&connection).await;
+            let legacy = zbus::Proxy::new(
+                &connection,
+                super::SERVICE_NAME,
+                super::LEGACY_OBJECT_PATH,
+                super::SERVICE_NAME,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("failed to create legacy client: {error}"));
+
+            let cookie: u32 = legacy
+                .call("Inhibit", &("test.video", "playing media"))
+                .await
+                .unwrap_or_else(|error| panic!("legacy Inhibit failed: {error}"));
+            assert!(matches!(
+                events.recv(),
+                Ok(DbusInhibitEvent::Added {
+                    inhibitor,
+                    active_count: 1,
+                }) if inhibitor.cookie == cookie
+            ));
+            standard
+                .un_inhibit(cookie)
+                .await
+                .unwrap_or_else(|error| panic!("standard UnInhibit failed: {error}"));
+            assert!(matches!(
+                events.recv(),
+                Ok(DbusInhibitEvent::Removed {
+                    inhibitor,
+                    active_count: 0,
+                }) if inhibitor.cookie == cookie
+            ));
+
+            let cookie = standard
+                .inhibit("test.video", "playing media")
+                .await
+                .unwrap_or_else(|error| panic!("standard Inhibit failed: {error}"));
+            assert!(matches!(
+                events.recv(),
+                Ok(DbusInhibitEvent::Added {
+                    inhibitor,
+                    active_count: 1,
+                }) if inhibitor.cookie == cookie
+            ));
+            let _: () = legacy
+                .call("UnInhibit", &(cookie,))
+                .await
+                .unwrap_or_else(|error| panic!("legacy UnInhibit failed: {error}"));
             assert!(matches!(
                 events.recv(),
                 Ok(DbusInhibitEvent::Removed {
