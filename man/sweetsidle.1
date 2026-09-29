@@ -181,6 +181,10 @@ Ordinary listeners respect compositor idle inhibitors, ScreenSaver D-Bus
 inhibitors, and block-mode systemd-logind inhibitors whose operation list
 contains
 .BR idle .
+The ScreenSaver interface is available at both
+.I /org/freedesktop/ScreenSaver
+and
+.IR /ScreenSaver .
 A listener with
 .B ignore_inhibit = true
 bypasses all three sources.
