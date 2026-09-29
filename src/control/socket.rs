@@ -23,6 +23,7 @@ const STATUS_COMMAND: &[u8] = b"status\n";
 const STATUS_JSON_COMMAND: &[u8] = b"status-json\n";
 const PAUSE_COMMAND: &[u8] = b"pause\n";
 const RESUME_COMMAND: &[u8] = b"resume\n";
+const RELOAD_COMMAND: &[u8] = b"reload\n";
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_REQUEST_BYTES: u64 = 64;
 const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
@@ -86,6 +87,10 @@ pub fn pause() -> Result<String, ControlError> {
 
 pub fn resume() -> Result<String, ControlError> {
     send_command_at(&control_socket_path()?, RESUME_COMMAND)
+}
+
+pub fn reload() -> Result<String, ControlError> {
+    send_command_at(&control_socket_path()?, RELOAD_COMMAND)
 }
 
 fn send_command_at(socket_path: &Path, command: &[u8]) -> Result<String, ControlError> {
@@ -275,6 +280,7 @@ fn handle_client(
         },
         ControlCommand::Pause => ControlEvent::Pause(control_request),
         ControlCommand::Resume => ControlEvent::Resume(control_request),
+        ControlCommand::Reload => ControlEvent::Reload(control_request),
     };
     events
         .send(event)
@@ -295,6 +301,7 @@ enum ControlCommand {
     Status(StatusFormat),
     Pause,
     Resume,
+    Reload,
 }
 
 fn request_command(request: &[u8]) -> Result<ControlCommand, ClientRequestError> {
@@ -303,6 +310,7 @@ fn request_command(request: &[u8]) -> Result<ControlCommand, ClientRequestError>
         STATUS_JSON_COMMAND => Ok(ControlCommand::Status(StatusFormat::Json)),
         PAUSE_COMMAND => Ok(ControlCommand::Pause),
         RESUME_COMMAND => Ok(ControlCommand::Resume),
+        RELOAD_COMMAND => Ok(ControlCommand::Reload),
         _ => Err(ClientRequestError::UnknownCommand),
     }
 }
@@ -396,7 +404,7 @@ mod tests {
                 assert_eq!(format, StatusFormat::Text);
                 request.respond("status response\n".to_string());
             }
-            ControlEvent::Pause(_) | ControlEvent::Resume(_) => {
+            ControlEvent::Pause(_) | ControlEvent::Resume(_) | ControlEvent::Reload(_) => {
                 panic!("unexpected control command")
             }
             ControlEvent::Failed(error) => panic!("control worker failed: {error}"),
@@ -434,7 +442,7 @@ mod tests {
                 assert_eq!(format, StatusFormat::Json);
                 request.respond("{\"paused\":false}\n".to_string());
             }
-            ControlEvent::Pause(_) | ControlEvent::Resume(_) => {
+            ControlEvent::Pause(_) | ControlEvent::Resume(_) | ControlEvent::Reload(_) => {
                 panic!("unexpected control command")
             }
             ControlEvent::Failed(error) => panic!("control worker failed: {error}"),
@@ -479,7 +487,7 @@ mod tests {
                 assert_eq!(format, StatusFormat::Text);
                 request.respond("still running\n".to_string());
             }
-            ControlEvent::Pause(_) | ControlEvent::Resume(_) => {
+            ControlEvent::Pause(_) | ControlEvent::Resume(_) | ControlEvent::Reload(_) => {
                 panic!("unexpected control command")
             }
             ControlEvent::Failed(error) => panic!("control worker failed: {error}"),
@@ -506,7 +514,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("control event missing: {error}"));
         match event {
             ControlEvent::Pause(request) => request.respond("sweetsidle: paused\n".to_string()),
-            ControlEvent::Status { .. } | ControlEvent::Resume(_) => {
+            ControlEvent::Status { .. } | ControlEvent::Resume(_) | ControlEvent::Reload(_) => {
                 panic!("unexpected control command")
             }
             ControlEvent::Failed(error) => panic!("control worker failed: {error}"),

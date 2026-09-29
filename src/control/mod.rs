@@ -4,7 +4,7 @@ mod protocol;
 mod socket;
 
 pub use error::ControlError;
-pub use socket::{pause, query_status, query_status_json, resume};
+pub use socket::{pause, query_status, query_status_json, reload, resume};
 
 pub(crate) use protocol::{
     ControlEvent, ControlRequest, DbusInhibitorStatus, StatusFormat, StatusSnapshot,
