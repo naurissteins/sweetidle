@@ -57,6 +57,23 @@ fn invalid_sighup_keeps_the_last_valid_config_active() -> Result<(), Box<dyn Err
 
 #[test]
 #[ignore = "runs the real daemon against a private Wayland compositor"]
+fn oversized_timeout_sighup_keeps_the_last_valid_config_active() -> Result<(), Box<dyn Error>> {
+    let mut harness = ReloadHarness::start("active")?;
+    harness.wait_for_markers(1)?;
+
+    fs::write(&harness.config_path, "[[listener]]\ntimeout = 5000000\n")?;
+    harness.signal_reload()?;
+    harness.wait_for_log("configuration reload rejected")?;
+    harness.compositor.pulse()?;
+    harness.wait_for_markers(2)?;
+
+    assert_eq!(harness.markers()?, ["active", "active"]);
+    harness.stop()?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "runs the real daemon against a private Wayland compositor"]
 fn status_reports_live_listener_state() -> Result<(), Box<dyn Error>> {
     let mut harness = ReloadHarness::start("status")?;
     harness.wait_for_markers(1)?;
