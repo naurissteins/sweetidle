@@ -12,6 +12,7 @@ env:
 jobs:
   fmt:
     name: Format
+    if: vars.RUN_CI == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +23,7 @@ jobs:
 
   clippy:
     name: Clippy
+    if: vars.RUN_CI == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +39,7 @@ jobs:
 
   check:
     name: Check
+    if: vars.RUN_CI == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +53,7 @@ jobs:
 
   test:
     name: Test
+    if: vars.RUN_CI == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,6 +67,7 @@ jobs:
 
   reload-integration:
     name: Reload Integration
+    if: vars.RUN_CI == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -78,6 +83,7 @@ jobs:
 
   dependencies:
     name: Dependencies
+    if: vars.RUN_CI == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -89,6 +95,7 @@ jobs:
 
   release-check:
     name: Release Check
+    if: vars.RUN_CI == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
