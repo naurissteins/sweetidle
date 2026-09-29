@@ -25,6 +25,7 @@ fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
         Action::Status(StatusOutput::Json) => print_control(control::query_status_json())?,
         Action::Pause => print_control(control::pause())?,
         Action::Resume => print_control(control::resume())?,
+        Action::Reload => print_control(control::reload())?,
         Action::CheckConfig(path) => check_config_file(path)?,
         Action::Run { path, verbose } => run_daemon(path, verbose)?,
     }
@@ -39,6 +40,7 @@ enum Action {
     Status(StatusOutput),
     Pause,
     Resume,
+    Reload,
     CheckConfig(Option<PathBuf>),
     Run {
         path: Option<PathBuf>,
@@ -70,6 +72,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Action, String> 
             }
             "pause" => set_control_action(&mut control_action, Action::Pause)?,
             "resume" => set_control_action(&mut control_action, Action::Resume)?,
+            "reload" => set_control_action(&mut control_action, Action::Reload)?,
             "--json" => status_json = true,
             "--check-config" => check_config = true,
             "-c" | "--config" => {
@@ -132,6 +135,7 @@ Commands:
   status [--json]     Show listener and inhibitor state
   pause               Pause idle listeners and the idle hint
   resume              Resume idle detection with fresh timers
+  reload              Queue a reload of the active config
 
 Options:
       --json           Print status as JSON (status only)
@@ -503,6 +507,11 @@ mod tests {
             parse_args(["status".to_string()]),
             Ok(Action::Status(StatusOutput::Text))
         );
+    }
+
+    #[test]
+    fn reload_selects_the_control_client() {
+        assert_eq!(parse_args(["reload".to_string()]), Ok(Action::Reload));
     }
 
     #[test]

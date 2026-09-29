@@ -12,6 +12,8 @@ sweetsidle \- Wayland idle management daemon for the Sweets compositor
 .br
 .B sweetsidle resume
 .br
+.B sweetsidle reload
+.br
 .B sweetsidle
 .RB [ \-c | \-\-config
 .IR PATH ]
@@ -62,6 +64,12 @@ Repeating the command is harmless.
 Resume idle detection and start every listener with a fresh timeout.
 Actions that became due while paused do not run immediately.
 Repeating the command is harmless.
+.TP
+.B reload
+Queue a reload of the active configuration through the control socket.
+The response confirms the request was queued; check daemon logs for validation
+and application results.
+If a reload is already pending, the response reports that it is pending.
 .SH OPTIONS
 .TP
 .BI "\-c " PATH ", \-\-config " PATH
@@ -215,8 +223,9 @@ Stop the daemon cleanly.
 Configured commands that are already running are left running.
 .TP
 .B SIGHUP
-Reload and validate the original configuration path without stopping the
-daemon.
+Queue the same reload as the
+.B reload
+command without stopping the daemon.
 Configuration and compositor compatibility validation failures are rejected
 and the complete last valid configuration remains active.
 Changes that would alter required D-Bus or logind integrations require a daemon

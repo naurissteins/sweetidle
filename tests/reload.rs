@@ -41,6 +41,22 @@ fn sighup_applies_valid_config_without_restarting_the_daemon() -> Result<(), Box
 
 #[test]
 #[ignore = "runs the real daemon against a private Wayland compositor"]
+fn control_reload_applies_valid_config_without_restarting_the_daemon() -> Result<(), Box<dyn Error>>
+{
+    let mut harness = ReloadHarness::start("initial")?;
+    harness.wait_for_markers(1)?;
+
+    harness.write_config("reloaded")?;
+    assert_eq!(harness.control("reload")?, "sweetsidle: reload requested\n");
+    harness.wait_for_markers(2)?;
+
+    assert_eq!(harness.markers()?, ["initial", "reloaded"]);
+    harness.stop()?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "runs the real daemon against a private Wayland compositor"]
 fn invalid_sighup_keeps_the_last_valid_config_active() -> Result<(), Box<dyn Error>> {
     let mut harness = ReloadHarness::start("active")?;
     harness.wait_for_markers(1)?;

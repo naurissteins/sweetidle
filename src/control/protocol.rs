@@ -14,6 +14,7 @@ pub(crate) enum ControlEvent {
     },
     Pause(ControlRequest),
     Resume(ControlRequest),
+    Reload(ControlRequest),
     Failed(super::ControlError),
 }
 
