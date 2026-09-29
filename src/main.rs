@@ -217,6 +217,13 @@ fn run_daemon(path: Option<PathBuf>, verbose: bool) -> Result<(), String> {
                     "configuration reloaded"
                 );
             }
+            ConfigReloadOutcome::Rejected(error) => {
+                warn!(
+                    config = %loaded.path.display(),
+                    error = %error,
+                    "configuration reload rejected; keeping current configuration"
+                );
+            }
             ConfigReloadOutcome::RestartRequired(reason) => {
                 warn!(
                     config = %loaded.path.display(),

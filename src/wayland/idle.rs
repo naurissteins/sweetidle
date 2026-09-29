@@ -289,6 +289,15 @@ impl IdleWaylandState {
         self.requests = requests;
         self.reset_notifications()
     }
+
+    pub(crate) fn validate_notifications(
+        &self,
+        listeners: &[TimeoutRequest],
+        idle_hint_timeout: Option<Duration>,
+    ) -> Result<(), IdleWaylandError> {
+        let requests = notification_requests(listeners, idle_hint_timeout);
+        validate_requests(&requests, self.notifier.as_ref().map(Proxy::version))
+    }
 }
 
 fn bind_idle_notifier(
@@ -530,6 +539,7 @@ mod tests {
     use super::{
         IdleEvent, IdleNotificationRequest, IdleNotificationTarget, IdleWaylandError,
         IdleWaylandState, ensure_input_idle_supported, notification_requests, timeout_millis,
+        validate_requests,
     };
     use crate::listener::{InhibitPolicy, ListenerId, TimeoutRequest};
 
@@ -656,6 +666,26 @@ mod tests {
             }) if listener_id == ListenerId::from_index(2)
         ));
         assert!(ensure_input_idle_supported(&request, 2).is_ok());
+    }
+
+    #[test]
+    fn validates_candidate_against_bound_notifier_version() {
+        let requests = notification_requests(
+            &[
+                request(0, 60),
+                request_with_policy(1, 120, InhibitPolicy::Ignore),
+            ],
+            None,
+        );
+
+        assert!(matches!(
+            validate_requests(&requests, Some(1)),
+            Err(IdleWaylandError::InputIdleUnsupported {
+                listener_id,
+                advertised_version: 1,
+            }) if listener_id == ListenerId::from_index(1)
+        ));
+        assert!(validate_requests(&requests, Some(2)).is_ok());
     }
 
     #[test]

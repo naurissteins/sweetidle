@@ -60,7 +60,7 @@ impl fmt::Display for RuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Wayland(source) => {
-                write!(formatter, "failed to initialize idle protocol: {source}")
+                write!(formatter, "Wayland idle protocol failed: {source}")
             }
             Self::CreateEventLoop(source) => {
                 write!(formatter, "failed to create event loop: {source}")

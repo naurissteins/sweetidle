@@ -211,8 +211,8 @@ Configured commands that are already running are left running.
 .B SIGHUP
 Reload and validate the original configuration path without stopping the
 daemon.
-Configuration parsing and validation failures are rejected and the complete
-last valid configuration remains active.
+Configuration and compositor compatibility validation failures are rejected
+and the complete last valid configuration remains active.
 Changes that would alter required D-Bus or logind integrations require a daemon
 restart and are not applied partially.
 .SH ENVIRONMENT
