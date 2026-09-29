@@ -114,8 +114,26 @@ impl ListenerSet {
         }))
     }
 
-    pub fn mark_active(&mut self) -> Vec<CommandIntent> {
-        self.mark_active_matching(|_| true)
+    pub fn mark_resumed(
+        &mut self,
+        listener_id: ListenerId,
+    ) -> Result<Option<CommandIntent>, ListenerError> {
+        let listener = self
+            .listeners
+            .get_mut(listener_id.index())
+            .ok_or(ListenerError::UnknownListener(listener_id))?;
+
+        if listener.phase == ListenerPhase::Armed {
+            return Ok(None);
+        }
+
+        listener.phase = ListenerPhase::Armed;
+
+        Ok(listener.on_resume.clone().map(|command| CommandIntent {
+            listener_id,
+            kind: CommandKind::Resume,
+            command,
+        }))
     }
 
     pub fn mark_active_respecting_inhibitors(&mut self) -> Vec<CommandIntent> {
@@ -239,8 +257,7 @@ mod tests {
         );
         assert_eq!(set.mark_timed_out(ListenerId(0)), Ok(None));
 
-        let resume = set.mark_active();
-        assert_eq!(resume, Vec::<CommandIntent>::new());
+        assert_eq!(set.mark_resumed(ListenerId(0)), Ok(None));
 
         assert_eq!(
             set.mark_timed_out(ListenerId(0)),
@@ -256,7 +273,7 @@ mod tests {
     fn resume_command_fires_only_after_timeout() {
         let mut set = ListenerSet::from_config(&sample_config());
 
-        assert_eq!(set.mark_active(), Vec::<CommandIntent>::new());
+        assert_eq!(set.mark_resumed(ListenerId(1)), Ok(None));
         assert_eq!(
             set.mark_timed_out(ListenerId(1)),
             Ok(Some(CommandIntent {
@@ -267,14 +284,14 @@ mod tests {
         );
 
         assert_eq!(
-            set.mark_active(),
-            vec![CommandIntent {
+            set.mark_resumed(ListenerId(1)),
+            Ok(Some(CommandIntent {
                 listener_id: ListenerId(1),
                 kind: CommandKind::Resume,
                 command: "sweetsmsg output '*' power on".to_string()
-            }]
+            }))
         );
-        assert_eq!(set.mark_active(), Vec::<CommandIntent>::new());
+        assert_eq!(set.mark_resumed(ListenerId(1)), Ok(None));
     }
 
     #[test]
@@ -293,12 +310,12 @@ mod tests {
 
         assert_eq!(set.mark_timed_out(ListenerId(0)), Ok(None));
         assert_eq!(
-            set.mark_active(),
-            vec![CommandIntent {
+            set.mark_resumed(ListenerId(0)),
+            Ok(Some(CommandIntent {
                 listener_id: ListenerId(0),
                 kind: CommandKind::Resume,
                 command: "resume".to_string()
-            }]
+            }))
         );
     }
 
@@ -308,6 +325,10 @@ mod tests {
 
         assert_eq!(
             set.mark_timed_out(ListenerId(99)),
+            Err(ListenerError::UnknownListener(ListenerId(99)))
+        );
+        assert_eq!(
+            set.mark_resumed(ListenerId(99)),
             Err(ListenerError::UnknownListener(ListenerId(99)))
         );
     }
@@ -332,7 +353,7 @@ mod tests {
 
         set.reset();
 
-        assert_eq!(set.mark_active(), Vec::<CommandIntent>::new());
+        assert_eq!(set.mark_resumed(listener), Ok(None));
     }
 
     #[test]

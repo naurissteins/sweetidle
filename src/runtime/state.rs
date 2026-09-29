@@ -504,8 +504,14 @@ impl RuntimeState {
                     self.command_intents.push(intent);
                 }
             }
-            IdleEvent::Resumed(_) => {
-                self.command_intents.extend(self.listeners.mark_active());
+            IdleEvent::Resumed(listener_id) => {
+                if let Some(intent) = self
+                    .listeners
+                    .mark_resumed(listener_id)
+                    .map_err(RuntimeError::Listener)?
+                {
+                    self.command_intents.push(intent);
+                }
             }
             IdleEvent::IdleHintIdled => {
                 if !self.idle_inhibited() {
@@ -717,7 +723,9 @@ mod tests {
         command::CommandContext,
         config::{Config, GeneralConfig, ListenerConfig},
         control::{ControlEvent, ControlRequest},
-        listener::{CommandIntent, CommandKind, ListenerError, ListenerId, ListenerSet},
+        listener::{
+            CommandIntent, CommandKind, ListenerError, ListenerId, ListenerPhase, ListenerSet,
+        },
         runtime::{RuntimeError, RuntimeEvent, ShutdownSignal},
         session::{
             DbusInhibitEvent, DelayInhibitor, InhibitorInfo, SessionEvent, SystemdIdleInhibitor,
@@ -749,6 +757,57 @@ mod tests {
         assert_eq!(
             state.command_intents,
             vec![intent(1, CommandKind::Resume, "outputs on")]
+        );
+    }
+
+    #[test]
+    fn compositor_inhibition_does_not_resume_an_ignored_listener() {
+        let config = Config {
+            general: GeneralConfig::default(),
+            idle_hint_timeout_seconds: None,
+            listeners: vec![
+                ListenerConfig {
+                    timeout_seconds: 300,
+                    on_timeout: Some("ignored timeout".to_string()),
+                    on_resume: Some("ignored resume".to_string()),
+                    ignore_inhibit: true,
+                },
+                ListenerConfig {
+                    timeout_seconds: 600,
+                    on_timeout: Some("respecting timeout".to_string()),
+                    on_resume: Some("respecting resume".to_string()),
+                    ignore_inhibit: false,
+                },
+            ],
+        };
+        let mut state = RuntimeState::new(
+            IdleWaylandState::default(),
+            ListenerSet::from_config(&config),
+            &config,
+            None,
+        );
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(0))));
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(1))));
+        state.command_intents.clear();
+
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Resumed(ListenerId::from_index(1))));
+
+        assert_eq!(
+            state.command_intents,
+            vec![intent(1, CommandKind::Resume, "respecting resume")]
+        );
+        assert_eq!(
+            state.status_snapshot().listeners[0].phase,
+            ListenerPhase::TimedOut
+        );
+
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Resumed(ListenerId::from_index(0))));
+        assert_eq!(
+            state.command_intents,
+            vec![
+                intent(1, CommandKind::Resume, "respecting resume"),
+                intent(0, CommandKind::Resume, "ignored resume"),
+            ]
         );
     }
 
@@ -818,6 +877,12 @@ mod tests {
 
         assert!(matches!(
             state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(9))),
+            Err(RuntimeError::Listener(ListenerError::UnknownListener(
+                listener_id
+            ))) if listener_id == ListenerId::from_index(9)
+        ));
+        assert!(matches!(
+            state.route_idle_event(IdleEvent::Resumed(ListenerId::from_index(9))),
             Err(RuntimeError::Listener(ListenerError::UnknownListener(
                 listener_id
             ))) if listener_id == ListenerId::from_index(9)
