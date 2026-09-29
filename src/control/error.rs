@@ -1,5 +1,6 @@
 use std::{error::Error, fmt, io, path::PathBuf};
 
+// retain socket paths and source errors for useful control diagnostics
 #[derive(Debug)]
 pub enum ControlError {
     MissingRuntimeDirectory,

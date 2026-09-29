@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+// cap records and diagnostic text supplied by other D-Bus clients
 const MAX_INHIBITORS: usize = 4096;
 const MAX_DIAGNOSTIC_CHARS: usize = 256;
 
@@ -92,6 +93,7 @@ impl InhibitorRegistry {
     }
 
     fn allocate_cookie(&mut self) -> Result<u32, InhibitorRegistryError> {
+        // wrapped cookies skip zero and any id still in use
         for _ in 0..=MAX_INHIBITORS {
             let cookie = self.next_cookie.max(1);
             self.next_cookie = cookie.wrapping_add(1).max(1);

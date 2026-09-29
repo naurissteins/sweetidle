@@ -87,6 +87,7 @@ impl CommandDispatcher {
         context: CommandContext,
         command: String,
     ) -> DispatchDecision {
+        // one running command occupies each listener event or session hook slot
         let slot = CommandSlot { context };
 
         if let Some(command) = self.running.iter().find(|command| command.slot == slot) {
@@ -96,6 +97,7 @@ impl CommandDispatcher {
             });
         }
 
+        // ids keep process completion tied to the original dispatch
         let command_id = CommandId(self.next_id);
         self.next_id += 1;
 

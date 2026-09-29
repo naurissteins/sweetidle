@@ -292,6 +292,7 @@ async fn worker_loop(
     requests: Receiver<SessionRequest>,
     shutdown: Receiver<()>,
 ) -> Result<(), SessionError> {
+    // dbus work stays off the Wayland event loop
     let connection = match Connection::system().await {
         Ok(connection) => connection,
         Err(source) => return report_initialization_error(ready, SessionError::Connect(source)),
@@ -402,6 +403,7 @@ async fn worker_loop(
     {
         return Ok(());
     }
+    // report readiness only after subscriptions and the initial state are set
     if ready.send(Ok(())).is_err() {
         return Ok(());
     }

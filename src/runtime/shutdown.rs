@@ -47,6 +47,7 @@ fn register_source(
     handle: &LoopHandle<'static, RuntimeState>,
     signal: RuntimeSignal,
 ) -> Result<(), RuntimeError> {
+    // a pipe turns signals into ordinary event loop readiness
     let source = SignalPipe::new(signal)?;
 
     handle

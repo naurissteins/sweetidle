@@ -14,6 +14,7 @@ pub enum ConfigLoadError {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self, ConfigLoadError> {
+        // preserve the path in either error so reload failures identify the file
         let source = fs::read_to_string(path).map_err(|source| ConfigLoadError::Read {
             path: path.to_path_buf(),
             source,

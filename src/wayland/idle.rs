@@ -199,6 +199,7 @@ impl IdleWaylandState {
     }
 
     fn accepts_generation(&self, data: &IdleNotificationData) -> bool {
+        // destroyed proxies can still leave queued events behind
         data.configuration_generation == self.configuration_generation
             && (data.inhibit_policy == InhibitPolicy::Ignore
                 || data.inhibition_generation == self.inhibition_generation)
@@ -241,6 +242,7 @@ impl IdleWaylandState {
     }
 
     pub(crate) fn reset_inhibited_notifications(&mut self) -> Result<(), IdleWaylandError> {
+        // listeners that ignore inhibitors keep their current notifications
         self.inhibition_generation = self.inhibition_generation.wrapping_add(1);
         self.events
             .retain(|event| event_ignores_inhibitors(&self.requests, event));

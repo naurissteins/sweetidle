@@ -101,6 +101,7 @@ impl ListenerSet {
             .get_mut(listener_id.index())
             .ok_or(ListenerError::UnknownListener(listener_id))?;
 
+        // duplicate idle notifications must not rerun a timeout action
         if listener.phase == ListenerPhase::TimedOut {
             return Ok(None);
         }
@@ -123,6 +124,7 @@ impl ListenerSet {
             .get_mut(listener_id.index())
             .ok_or(ListenerError::UnknownListener(listener_id))?;
 
+        // resume actions belong only to listeners that already timed out
         if listener.phase == ListenerPhase::Armed {
             return Ok(None);
         }

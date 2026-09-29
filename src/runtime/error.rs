@@ -8,6 +8,7 @@ use crate::{
     wayland::IdleWaylandError,
 };
 
+// keep errors typed across event sources until the binary logs them
 #[derive(Debug)]
 pub enum RuntimeError {
     Wayland(IdleWaylandError),

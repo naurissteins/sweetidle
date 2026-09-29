@@ -1,3 +1,4 @@
+// expose validated config types without exposing the parsing documents
 mod loader;
 mod model;
 mod parser;
