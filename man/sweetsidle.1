@@ -91,7 +91,7 @@ Print the version and exit.
 The default configuration path is
 .IR ~/.config/sweetsidle/config.toml .
 The file uses TOML and rejects unknown fields.
-Timeouts are positive integers measured in seconds.
+Timeouts are integers from 1 through 4294967, measured in seconds.
 Configured command strings must not be empty and are executed through
 .BR "sh -c" .
 .PP
@@ -211,8 +211,8 @@ Configured commands that are already running are left running.
 .B SIGHUP
 Reload and validate the original configuration path without stopping the
 daemon.
-Invalid configuration is rejected and the complete last valid configuration
-remains active.
+Configuration parsing and validation failures are rejected and the complete
+last valid configuration remains active.
 Changes that would alter required D-Bus or logind integrations require a daemon
 restart and are not applied partially.
 .SH ENVIRONMENT

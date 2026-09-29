@@ -4,6 +4,8 @@ use serde::Deserialize;
 
 use super::{Config, GeneralConfig, ListenerConfig};
 
+const MAX_TIMEOUT_SECONDS: u64 = u32::MAX as u64 / 1000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
     Parse(String),
@@ -137,13 +139,22 @@ fn required_timeout(table: &str, value: Option<i64>) -> Result<u64, ConfigError>
         field: "timeout".to_string(),
     })?;
 
-    u64::try_from(timeout)
+    let timeout = u64::try_from(timeout)
         .ok()
         .filter(|timeout| *timeout > 0)
         .ok_or_else(|| ConfigError::InvalidValue {
             field: format!("{table}.timeout"),
             reason: "must be greater than zero".to_string(),
-        })
+        })?;
+
+    if timeout > MAX_TIMEOUT_SECONDS {
+        return Err(ConfigError::InvalidValue {
+            field: format!("{table}.timeout"),
+            reason: format!("must be at most {MAX_TIMEOUT_SECONDS} seconds"),
+        });
+    }
+
+    Ok(timeout)
 }
 
 fn optional_command(field: &str, value: Option<String>) -> Result<Option<String>, ConfigError> {
@@ -164,7 +175,7 @@ fn optional_command(field: &str, value: Option<String>) -> Result<Option<String>
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, ConfigError};
+    use super::{Config, ConfigError, MAX_TIMEOUT_SECONDS};
 
     #[test]
     fn parses_general_idle_hint_and_listeners() {
@@ -272,6 +283,44 @@ on_resume = "sweetsmsg output '*' power on"
                 }
             );
         }
+    }
+
+    #[test]
+    fn accepts_largest_protocol_timeout_for_listener_and_idle_hint() {
+        let source = format!(
+            "[idle_hint]\ntimeout = {MAX_TIMEOUT_SECONDS}\n\n[[listener]]\ntimeout = {MAX_TIMEOUT_SECONDS}\n"
+        );
+
+        let config = Config::parse(&source).unwrap_or_else(|error| panic!("{error}"));
+
+        assert_eq!(config.idle_hint_timeout_seconds, Some(MAX_TIMEOUT_SECONDS));
+        assert_eq!(config.listeners[0].timeout_seconds, MAX_TIMEOUT_SECONDS);
+    }
+
+    #[test]
+    fn rejects_listener_timeout_above_protocol_limit() {
+        let source = format!("[[listener]]\ntimeout = {}\n", MAX_TIMEOUT_SECONDS + 1);
+
+        assert_eq!(
+            parse_error(&source),
+            ConfigError::InvalidValue {
+                field: "listener[0].timeout".to_string(),
+                reason: format!("must be at most {MAX_TIMEOUT_SECONDS} seconds"),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_idle_hint_timeout_above_protocol_limit() {
+        let source = format!("[idle_hint]\ntimeout = {}\n", MAX_TIMEOUT_SECONDS + 1);
+
+        assert_eq!(
+            parse_error(&source),
+            ConfigError::InvalidValue {
+                field: "idle_hint.timeout".to_string(),
+                reason: format!("must be at most {MAX_TIMEOUT_SECONDS} seconds"),
+            }
+        );
     }
 
     #[test]
