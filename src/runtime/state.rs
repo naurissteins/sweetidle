@@ -428,6 +428,11 @@ impl RuntimeState {
                 }
                 SessionEvent::Resumed => {
                     self.preparing_for_sleep = false;
+                    // this cycle is over even if its hook is still running or queued
+                    self.delay_inhibitors.clear();
+                    for intent in &mut self.session_command_intents {
+                        intent.inhibitor = None;
+                    }
                     self.set_idle_hint(false);
                     self.runtime_events.push(RuntimeEvent::ResumedFromSleep);
                     if let Some(command) = self.after_resume_command.clone() {
@@ -752,7 +757,14 @@ fn register_process_monitor(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, os::fd::OwnedFd, sync::mpsc, time::Duration};
+    use std::{
+        fs::File,
+        io::{self, Read},
+        os::{fd::OwnedFd, unix::net::UnixStream},
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
+    };
 
     use calloop::EventLoop;
 
@@ -1452,6 +1464,112 @@ mod tests {
     }
 
     #[test]
+    fn resume_releases_each_cycles_inhibitor_while_the_hook_keeps_running() {
+        let mut event_loop = new_event_loop();
+        let mut state = runtime_state();
+        state.before_sleep_command = Some("exec sleep 5".to_string());
+
+        for cycle in 0..2 {
+            let (mut observer, inhibitor) = observable_inhibitor();
+            state.record_session_event(SessionEvent::PrepareForSleep(Some(inhibitor)));
+            assert_runtime_ok(state.route_session_events());
+            assert_runtime_ok(state.dispatch_command_intents(&event_loop.handle()));
+            assert!(matches!(observer.read(&mut [0]), Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock));
+            assert_eq!(state.delay_inhibitors.len(), 1);
+            let events = state.take_runtime_events();
+            if cycle == 0 {
+                assert!(matches!(
+                    events.as_slice(),
+                    [
+                        RuntimeEvent::PreparingForSleep,
+                        RuntimeEvent::CommandStarted(_)
+                    ]
+                ));
+            } else {
+                assert!(matches!(
+                    events.as_slice(),
+                    [
+                        RuntimeEvent::PreparingForSleep,
+                        RuntimeEvent::CommandSkipped(_)
+                    ]
+                ));
+            }
+
+            state.record_session_event(SessionEvent::Resumed);
+            assert_runtime_ok(state.route_session_events());
+            assert!(state.delay_inhibitors.is_empty());
+            assert_inhibitor_released(&mut observer);
+            assert!(!state.preparing_for_sleep);
+            assert!(matches!(
+                state.take_runtime_events().as_slice(),
+                [RuntimeEvent::ResumedFromSleep]
+            ));
+            let completions = state
+                .processes
+                .collect_finished()
+                .unwrap_or_else(|error| panic!("{error}"));
+            assert!(completions.is_empty());
+            assert_eq!(state.processes.running_count(), 1);
+            assert!(!state.dispatcher.is_empty());
+        }
+
+        let process = state.processes.running_processes().remove(0);
+        let pid = i32::try_from(process.process_id)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+            .unwrap_or_else(|| panic!("invalid test process ID"));
+        rustix::process::kill_process(pid, rustix::process::Signal::TERM)
+            .unwrap_or_else(|error| panic!("failed to stop test command: {error}"));
+        let _ = wait_for_process_events(&mut event_loop, &mut state);
+        assert!(state.dispatcher.is_empty());
+        assert!(state.processes.is_empty());
+    }
+
+    #[test]
+    fn resume_releases_queued_inhibitors_before_command_dispatch() {
+        let mut event_loop = new_event_loop();
+        let mut state = runtime_state();
+        state.before_sleep_command = Some("exit 0".to_string());
+        let (mut observer, inhibitor) = observable_inhibitor();
+        state.record_session_event(SessionEvent::PrepareForSleep(Some(inhibitor)));
+        state.record_session_event(SessionEvent::Resumed);
+
+        assert_runtime_ok(state.route_session_events());
+
+        assert_inhibitor_released(&mut observer);
+        assert!(matches!(
+            state.session_command_intents.as_slice(),
+            [SessionCommandIntent {
+                context: CommandContext::BeforeSleep,
+                inhibitor: None,
+                ..
+            }]
+        ));
+        // later prepare in the same batch still guards its own sleep cycle
+        let (mut next_observer, next_inhibitor) = observable_inhibitor();
+        state.record_session_event(SessionEvent::PrepareForSleep(Some(next_inhibitor)));
+        assert_runtime_ok(state.route_session_events());
+        assert_runtime_ok(state.dispatch_command_intents(&event_loop.handle()));
+        assert!(matches!(next_observer.read(&mut [0]), Err(error)
+            if error.kind() == io::ErrorKind::WouldBlock));
+        assert_eq!(state.delay_inhibitors.len(), 1);
+        assert!(matches!(
+            state.take_runtime_events().as_slice(),
+            [
+                RuntimeEvent::PreparingForSleep,
+                RuntimeEvent::ResumedFromSleep,
+                RuntimeEvent::PreparingForSleep,
+                RuntimeEvent::CommandStarted(_),
+                RuntimeEvent::CommandSkipped(_)
+            ]
+        ));
+        let _ = wait_for_process_events(&mut event_loop, &mut state);
+        assert!(state.delay_inhibitors.is_empty());
+        assert!(state.processes.is_empty());
+    }
+
+    #[test]
     fn launches_and_reaps_commands_through_pidfds() {
         let mut event_loop = new_event_loop();
         let mut state = runtime_state();
@@ -1605,6 +1723,33 @@ mod tests {
         if let Err(error) = result {
             panic!("{error}");
         }
+    }
+
+    fn assert_inhibitor_released(observer: &mut UnixStream) {
+        // concurrent forks can briefly hold a CLOEXEC FD until the child execs
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match observer.read(&mut [0]) {
+                Ok(0) => return,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                result => panic!("unexpected inhibitor observation: {result:?}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "sleep inhibitor FD is still open"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn observable_inhibitor() -> (UnixStream, DelayInhibitor) {
+        let (observer, held) = UnixStream::pair()
+            .unwrap_or_else(|error| panic!("failed to create test socket pair: {error}"));
+        observer
+            .set_nonblocking(true)
+            .unwrap_or_else(|error| panic!("failed to set test socket nonblocking: {error}"));
+        let fd: OwnedFd = held.into();
+        (observer, DelayInhibitor::new(fd.into()))
     }
 
     fn test_inhibitor() -> DelayInhibitor {
