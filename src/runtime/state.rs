@@ -46,6 +46,7 @@ pub(super) struct RuntimeState {
     reload_request_failed: bool,
     reload_channel_closed: bool,
     reload_pending: bool,
+    reload_rerequested: bool,
     active_dbus_inhibitors: usize,
     active_systemd_inhibitors: usize,
     active_dbus_inhibitor_details: HashMap<u32, InhibitorInfo>,
@@ -90,6 +91,7 @@ impl RuntimeState {
             reload_request_failed: false,
             reload_channel_closed: false,
             reload_pending: false,
+            reload_rerequested: false,
             active_dbus_inhibitors: 0,
             active_systemd_inhibitors: 0,
             active_dbus_inhibitor_details: HashMap::new(),
@@ -219,6 +221,8 @@ impl RuntimeState {
             return ReloadRequestOutcome::ShuttingDown;
         }
         if self.reload_pending {
+            // the worker may have already read the file before this request arrived
+            self.reload_rerequested = true;
             return ReloadRequestOutcome::AlreadyPending;
         }
         let Some(requester) = self.reload_requester.as_ref() else {
@@ -259,6 +263,9 @@ impl RuntimeState {
                     self.runtime_events
                         .push(RuntimeEvent::ConfigReloadRejected(error));
                 }
+            }
+            if std::mem::take(&mut self.reload_rerequested) {
+                self.request_reload();
             }
         }
 
@@ -758,7 +765,7 @@ fn register_process_monitor(
 #[cfg(test)]
 mod tests {
     use std::{
-        fs::File,
+        fs::{self, File},
         io::{self, Read},
         os::{fd::OwnedFd, unix::net::UnixStream},
         sync::mpsc,
@@ -769,6 +776,7 @@ mod tests {
     use calloop::EventLoop;
 
     use super::{ConfigReloadEvent, ReloadRequestOutcome, RuntimeState, SessionCommandIntent};
+    use crate::runtime::reload::ConfigReloadMonitor;
     use crate::{
         command::CommandContext,
         config::{Config, GeneralConfig, ListenerConfig},
@@ -1309,6 +1317,85 @@ mod tests {
     }
 
     #[test]
+    fn pending_reload_requests_reread_edits_saved_after_the_first_read() {
+        let directory = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let path = directory.path().join("config.toml");
+        fs::write(&path, "[[listener]]\ntimeout = 10\n").unwrap_or_else(|error| panic!("{error}"));
+        let (_monitor, requester, results) =
+            ConfigReloadMonitor::connect(path.clone()).unwrap_or_else(|error| panic!("{error}"));
+        let mut state = runtime_state();
+        state.reload_requester = Some(requester);
+        assert_eq!(state.request_reload(), ReloadRequestOutcome::Requested);
+        let first = wait_for_reload_result(&results);
+        assert!(matches!(&first, ConfigReloadEvent::Ready(config)
+            if config.listeners[0].timeout_seconds == 10));
+
+        // wait for the old read before saving and requesting the newer config
+        fs::write(&path, "[[listener]]\ntimeout = 20\n").unwrap_or_else(|error| panic!("{error}"));
+        for _ in 0..3 {
+            assert_eq!(state.request_reload(), ReloadRequestOutcome::AlreadyPending);
+        }
+        state.record_reload_event(first);
+        assert_runtime_ok(state.route_reload_events());
+
+        assert!(state.reload_pending);
+        assert!(matches!(
+            state.take_runtime_events().as_slice(),
+            [
+                RuntimeEvent::ConfigReloadRequested,
+                RuntimeEvent::ConfigReloadReady(_),
+                RuntimeEvent::ConfigReloadRequested
+            ]
+        ));
+        let second = wait_for_reload_result(&results);
+        assert!(matches!(&second, ConfigReloadEvent::Ready(config)
+            if config.listeners[0].timeout_seconds == 20));
+        state.record_reload_event(second);
+        assert_runtime_ok(state.route_reload_events());
+
+        assert!(!state.reload_pending);
+        assert!(matches!(
+            state.take_runtime_events().as_slice(),
+            [RuntimeEvent::ConfigReloadReady(_)]
+        ));
+        assert!(matches!(results.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn pending_reload_requests_retry_after_an_invalid_read() {
+        let directory = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let path = directory.path().join("config.toml");
+        fs::write(&path, "[[listener]]\ntimeout = 0\n").unwrap_or_else(|error| panic!("{error}"));
+        let (_monitor, requester, results) =
+            ConfigReloadMonitor::connect(path.clone()).unwrap_or_else(|error| panic!("{error}"));
+        let mut state = runtime_state();
+        state.reload_requester = Some(requester);
+        assert_eq!(state.request_reload(), ReloadRequestOutcome::Requested);
+        let rejected = wait_for_reload_result(&results);
+        assert!(matches!(&rejected, ConfigReloadEvent::Rejected(_)));
+        fs::write(&path, "[[listener]]\ntimeout = 30\n").unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(state.request_reload(), ReloadRequestOutcome::AlreadyPending);
+        state.record_reload_event(rejected);
+        assert_runtime_ok(state.route_reload_events());
+
+        assert!(state.reload_pending);
+        assert!(matches!(
+            state.take_runtime_events().as_slice(),
+            [
+                RuntimeEvent::ConfigReloadRequested,
+                RuntimeEvent::ConfigReloadRejected(_),
+                RuntimeEvent::ConfigReloadRequested
+            ]
+        ));
+        let ready = wait_for_reload_result(&results);
+        assert!(matches!(&ready, ConfigReloadEvent::Ready(config)
+            if config.listeners[0].timeout_seconds == 30));
+        state.record_reload_event(ready);
+        assert_runtime_ok(state.route_reload_events());
+        assert!(!state.reload_pending);
+    }
+
+    #[test]
     fn rejected_reload_keeps_runtime_available_for_another_request() {
         let mut state = runtime_state();
         state.reload_pending = true;
@@ -1722,6 +1809,21 @@ mod tests {
     fn assert_runtime_ok(result: Result<(), RuntimeError>) {
         if let Err(error) = result {
             panic!("{error}");
+        }
+    }
+
+    fn wait_for_reload_result(
+        results: &calloop::channel::Channel<ConfigReloadEvent>,
+    ) -> ConfigReloadEvent {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match results.try_recv() {
+                Ok(event) => return event,
+                Err(mpsc::TryRecvError::Disconnected) => panic!("reload worker disconnected"),
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            assert!(Instant::now() < deadline, "reload worker did not respond");
+            thread::sleep(Duration::from_millis(1));
         }
     }
 
