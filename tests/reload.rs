@@ -1,6 +1,7 @@
 use std::{
     error::Error,
     fs::{self, File},
+    os::unix::process::CommandExt,
     process::{Child, Command, Stdio},
     sync::{
         Arc,
@@ -10,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rustix::process::{Pid, Signal, kill_process};
+use rustix::process::{Pid, Signal, kill_process, kill_process_group};
 use tempfile::TempDir;
 use wayland_protocols::ext::idle_notify::v1::server::{
     ext_idle_notification_v1::{self, ExtIdleNotificationV1},
@@ -167,6 +168,39 @@ fn pause_suppresses_idle_actions_until_resume() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[test]
+#[ignore = "runs the real daemon against a private Wayland compositor"]
+fn foreground_group_interrupt_leaves_running_commands_alive() -> Result<(), Box<dyn Error>> {
+    let mut harness = ReloadHarness::start("initial")?;
+    harness.wait_for_markers(1)?;
+    let marker_path = shell_quote(path_text(&harness.marker_path)?);
+    let command = format!(
+        "printf 'started\\n' >> {marker_path}; sleep 1; printf 'survived\\n' >> {marker_path}"
+    );
+    let command = command.replace('\\', "\\\\").replace('"', "\\\"");
+    fs::write(
+        &harness.config_path,
+        format!(
+            "[general]\nignore_dbus_inhibit = true\nignore_systemd_inhibit = true\n\n[[listener]]\ntimeout = 3600\non_timeout = \"{command}\"\nignore_inhibit = true\n"
+        ),
+    )?;
+    harness.signal_reload()?;
+    harness.wait_for_markers(2)?;
+
+    let child = harness.daemon.child.as_ref().ok_or("daemon is missing")?;
+    // signal only the isolated daemon group, as terminal ctrl-c would
+    kill_process_group(Pid::from_child(child), Signal::INT)?;
+    harness.daemon.wait_for_exit()?;
+
+    let deadline = Instant::now() + WAIT_LIMIT;
+    while Instant::now() < deadline && harness.markers()?.len() < 3 {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(harness.markers()?, ["initial", "started", "survived"]);
+    harness.compositor.stop()?;
+    Ok(())
+}
+
 struct ReloadHarness {
     config_path: std::path::PathBuf,
     marker_path: std::path::PathBuf,
@@ -206,6 +240,7 @@ impl ReloadHarness {
             .env("XDG_RUNTIME_DIR", temp_dir.path())
             .stdout(Stdio::from(log_stdout))
             .stderr(Stdio::from(log))
+            .process_group(0)
             .spawn()?;
 
         Ok(Self {
@@ -372,6 +407,10 @@ impl TestDaemon {
 
     fn stop(&mut self) -> Result<(), Box<dyn Error>> {
         self.signal(Signal::INT)?;
+        self.wait_for_exit()
+    }
+
+    fn wait_for_exit(&mut self) -> Result<(), Box<dyn Error>> {
         let child = self
             .child
             .take()
