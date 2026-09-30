@@ -11,11 +11,13 @@ use async_channel::{Receiver, Sender, bounded, unbounded};
 use calloop::channel::{Channel, Sender as EventSender, channel};
 use futures_lite::{StreamExt, future};
 use zbus::{
-    Connection, proxy,
+    Connection, Message, proxy,
     zvariant::{OwnedFd, OwnedObjectPath},
 };
 
 use super::{LogindInhibitor, SystemdIdleInhibitor, idle_block_inhibitors};
+
+mod signals;
 
 #[proxy(
     interface = "org.freedesktop.login1.Manager",
@@ -49,12 +51,6 @@ trait LogindManager {
 )]
 trait LogindSession {
     fn set_idle_hint(&self, idle: bool) -> zbus::Result<()>;
-
-    #[zbus(signal)]
-    fn lock(&self) -> zbus::Result<()>;
-
-    #[zbus(signal)]
-    fn unlock(&self) -> zbus::Result<()>;
 }
 
 #[derive(Debug)]
@@ -339,20 +335,11 @@ async fn worker_loop(
     } else {
         None
     };
-    let mut lock_signals = match (features.session_events, session_proxy.as_ref()) {
-        (true, Some(proxy)) => match proxy.receive_lock().await {
+    let mut session_signals = match (features.session_events, session_proxy.as_ref()) {
+        (true, Some(proxy)) => match signals::subscribe(proxy).await {
             Ok(signals) => Some(signals),
-            Err(source) => {
-                return report_initialization_error(ready, SessionError::SubscribeSession(source));
-            }
-        },
-        (false, _) | (true, None) => None,
-    };
-    let mut unlock_signals = match (features.session_events, session_proxy.as_ref()) {
-        (true, Some(proxy)) => match proxy.receive_unlock().await {
-            Ok(signals) => Some(signals),
-            Err(source) => {
-                return report_initialization_error(ready, SessionError::SubscribeSession(source));
+            Err(error) => {
+                return report_initialization_error(ready, error);
             }
         },
         (false, _) | (true, None) => None,
@@ -433,29 +420,21 @@ async fn worker_loop(
                     }
                 },
                 async {
-                    match lock_signals.as_mut() {
-                        Some(signals) => WorkerInput::Lock(signals.next().await.is_some()),
+                    match session_signals.as_mut() {
+                        Some(signals) => WorkerInput::Session(signals.next().await),
                         None => pending().await,
                     }
                 },
             ),
             future::race(
-                future::race(
-                    async {
-                        match unlock_signals.as_mut() {
-                            Some(signals) => WorkerInput::Unlock(signals.next().await.is_some()),
-                            None => pending().await,
+                async {
+                    match idle_inhibitor_changes.as_mut() {
+                        Some(changes) => {
+                            WorkerInput::IdleInhibitorsChanged(changes.next().await.is_some())
                         }
-                    },
-                    async {
-                        match idle_inhibitor_changes.as_mut() {
-                            Some(changes) => {
-                                WorkerInput::IdleInhibitorsChanged(changes.next().await.is_some())
-                            }
-                            None => pending().await,
-                        }
-                    },
-                ),
+                        None => pending().await,
+                    }
+                },
                 future::race(
                     async {
                         match requests.recv().await {
@@ -490,19 +469,15 @@ async fn worker_loop(
                 }
             }
             WorkerInput::Sleep(Ok(None))
-            | WorkerInput::Lock(false)
-            | WorkerInput::Unlock(false)
+            | WorkerInput::Session(None)
             | WorkerInput::IdleInhibitorsChanged(false) => {
                 return Err(SessionError::Disconnected);
             }
             WorkerInput::Sleep(Err(error)) => return Err(error),
-            WorkerInput::Lock(true) => {
-                if events.send(SessionEvent::LockRequested).is_err() {
-                    return Ok(());
-                }
-            }
-            WorkerInput::Unlock(true) => {
-                if events.send(SessionEvent::UnlockRequested).is_err() {
+            WorkerInput::Session(Some(signal)) => {
+                if let Some(event) = signals::decode(&signal)?
+                    && events.send(event).is_err()
+                {
                     return Ok(());
                 }
             }
@@ -605,8 +580,7 @@ fn report_initialization_error<T>(
 
 enum WorkerInput {
     Sleep(Result<Option<bool>, SessionError>),
-    Lock(bool),
-    Unlock(bool),
+    Session(Option<Message>),
     IdleInhibitorsChanged(bool),
     Request(SessionRequest),
     Shutdown,
@@ -619,7 +593,11 @@ enum SessionRequest {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc::TryRecvError, thread, time::Duration};
+    use std::{
+        sync::mpsc::TryRecvError,
+        thread,
+        time::{Duration, Instant},
+    };
 
     use super::{LogindFeatures, LogindManagerProxy, LogindMonitor, SessionEvent};
 
@@ -637,6 +615,81 @@ mod tests {
             Err(error) => panic!("failed to initialize logind monitor: {error}"),
         };
 
+        drop(monitor);
+    }
+
+    #[test]
+    #[ignore = "requires systemd-logind and requests session lock/unlock"]
+    fn observes_session_lock_unlock_in_order() {
+        let (monitor, events) = LogindMonitor::connect(LogindFeatures {
+            sleep_events: false,
+            delay_inhibitor: false,
+            session_events: true,
+            idle_inhibitors: false,
+            idle_hint: false,
+        })
+        .unwrap_or_else(|error| panic!("failed to initialize logind monitor: {error}"));
+        async_io::block_on(async {
+            let connection = zbus::Connection::system()
+                .await
+                .unwrap_or_else(|error| panic!("failed to connect test client: {error}"));
+            let manager = LogindManagerProxy::new(&connection)
+                .await
+                .unwrap_or_else(|error| panic!("failed to create manager proxy: {error}"));
+            let path = super::resolve_session_path(&manager)
+                .await
+                .unwrap_or_else(|error| panic!("failed to resolve test session: {error}"));
+            let session = super::LogindSessionProxy::builder(&connection)
+                .path(path)
+                .unwrap_or_else(|error| panic!("invalid session path: {error}"))
+                .build()
+                .await
+                .unwrap_or_else(|error| panic!("failed to create session proxy: {error}"));
+            for _ in 0..20 {
+                let _: () = session
+                    .inner()
+                    .call("Lock", &())
+                    .await
+                    .unwrap_or_else(|error| panic!("session lock request failed: {error}"));
+                let _: () = session
+                    .inner()
+                    .call("Unlock", &())
+                    .await
+                    .unwrap_or_else(|error| panic!("session unlock request failed: {error}"));
+            }
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut received = 0;
+        while received < 40 {
+            match events.try_recv() {
+                Ok(SessionEvent::LockRequested) => {
+                    assert_eq!(
+                        received % 2,
+                        0,
+                        "lock signal {received} arrived out of order"
+                    );
+                    received += 1;
+                }
+                Ok(SessionEvent::UnlockRequested) => {
+                    assert_eq!(
+                        received % 2,
+                        1,
+                        "unlock signal {received} arrived out of order"
+                    );
+                    received += 1;
+                }
+                Ok(event) => panic!("unexpected session event: {event:?}"),
+                Err(TryRecvError::Disconnected) => panic!("logind worker disconnected"),
+                Err(TryRecvError::Empty) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "logind did not deliver all 40 signals"
+                    );
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
         drop(monitor);
     }
 
