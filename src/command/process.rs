@@ -1,6 +1,7 @@
 use std::{
     error::Error,
     fmt, io,
+    os::unix::process::CommandExt,
     process::{Child, Command, ExitStatus, Stdio},
 };
 
@@ -52,6 +53,8 @@ impl ProcessAdapter {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
+            // keep terminal interrupts from reaching running lockers and helpers
+            .process_group(0)
             .spawn()
             .map_err(|source| ProcessError::Spawn {
                 command_id: request.command_id,
@@ -163,6 +166,8 @@ struct RunningProcess {
 mod tests {
     use std::{thread, time::Duration};
 
+    use rustix::process::{Pid, getpgid};
+
     use super::{CommandContext, CommandId, ProcessAdapter, SpawnRequest};
     use crate::listener::{CommandKind, ListenerId};
 
@@ -218,6 +223,22 @@ mod tests {
         );
 
         let _ = wait_for_completion(&mut processes);
+    }
+
+    #[test]
+    fn starts_commands_in_their_own_process_group() -> Result<(), Box<dyn std::error::Error>> {
+        let mut processes = ProcessAdapter::default();
+        processes.spawn(request(3, "exec sleep 1"))?;
+        let child = &mut processes.running[0].child;
+        let pid = Pid::from_child(child);
+        let group = getpgid(Some(pid));
+
+        // reap the helper before asserting so a regression cannot leave it running
+        child.kill()?;
+        child.wait()?;
+
+        assert_eq!(group?, pid);
+        Ok(())
     }
 
     fn request(command_index: usize, command: &str) -> SpawnRequest {

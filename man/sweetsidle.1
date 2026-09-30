@@ -236,6 +236,8 @@ second daemon instance from starting.
 .B SIGINT, SIGTERM
 Stop the daemon cleanly.
 Configured commands that are already running are left running.
+Each command starts in its own process group, so terminal Ctrl-C does not
+interrupt running lockers or helpers.
 .TP
 .B SIGHUP
 Queue the same reload as the
