@@ -122,6 +122,8 @@ Command run for a logind session lock request.
 .B unlock_command
 Command run for a logind session unlock request.
 Leave this unset unless the locker provides a safe external unlock operation.
+Lock and unlock requests are routed in logind signal order.
+Hooks run asynchronously, so completion order is not guaranteed.
 .TP
 .B before_sleep_command
 Command run before the system enters sleep.
