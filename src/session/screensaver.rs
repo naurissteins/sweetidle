@@ -416,7 +416,8 @@ mod tests {
     #[zbus::proxy(
         interface = "org.freedesktop.ScreenSaver",
         default_service = "org.freedesktop.ScreenSaver",
-        default_path = "/org/freedesktop/ScreenSaver"
+        default_path = "/org/freedesktop/ScreenSaver",
+        gen_blocking = false
     )]
     trait ScreenSaverClient {
         fn inhibit(&self, application_name: &str, reason_for_inhibit: &str) -> zbus::Result<u32>;
