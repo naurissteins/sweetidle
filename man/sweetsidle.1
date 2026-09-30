@@ -121,8 +121,12 @@ Command run before the system enters sleep.
 Command run after logind reports that the sleep operation finished or failed.
 .TP
 .B wait_before_sleep
-When true, hold a logind delay inhibitor until the before-sleep command exits or
-logind's maximum delay expires.
+When true, hold a logind delay inhibitor until the before-sleep command exits
+or logind reports that the sleep operation completed or failed.
+Logind may proceed after its maximum delay even if the inhibitor is still held.
+Finishing the sleep cycle releases its inhibitor without stopping the command.
+A still-running command can delay each later sleep attempt up to the maximum;
+prefer a locker that daemonizes only after the session is locked.
 Defaults to true.
 .TP
 .B ignore_dbus_inhibit
