@@ -70,6 +70,8 @@ Queue a reload of the active configuration through the control socket.
 The response confirms the request was queued; check daemon logs for validation
 and application results.
 If a reload is already pending, the response reports that it is pending.
+Requests received while a reload is pending are coalesced into one follow-up
+read, even if the pending read is rejected.
 .SH OPTIONS
 .TP
 .BI "\-c " PATH ", \-\-config " PATH
@@ -230,6 +232,8 @@ Configured commands that are already running are left running.
 Queue the same reload as the
 .B reload
 command without stopping the daemon.
+Requests received while a reload is pending schedule the same coalesced
+follow-up read as the control command.
 Configuration and compositor compatibility validation failures are rejected
 and the complete last valid configuration remains active.
 Changes that would alter required D-Bus or logind integrations require a daemon
