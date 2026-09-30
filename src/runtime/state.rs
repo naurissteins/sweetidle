@@ -132,6 +132,8 @@ impl RuntimeState {
             self.wayland.pause_notifications();
         }
 
+        self.dispatcher
+            .remap_listener_slots(&self.listeners.matching_listener_ids(&listeners));
         self.listeners = listeners;
         self.lock_command = config.general.lock_command.clone();
         self.unlock_command = config.general.unlock_command.clone();
@@ -778,7 +780,7 @@ mod tests {
     use super::{ConfigReloadEvent, ReloadRequestOutcome, RuntimeState, SessionCommandIntent};
     use crate::runtime::reload::ConfigReloadMonitor;
     use crate::{
-        command::CommandContext,
+        command::{CommandContext, DispatchDecision},
         config::{Config, GeneralConfig, ListenerConfig},
         control::{ControlEvent, ControlRequest},
         listener::{
@@ -927,6 +929,117 @@ mod tests {
         assert_runtime_ok(state.apply_config(&config));
 
         assert_eq!(state.take_idle_hint_updates(), vec![false]);
+    }
+
+    #[test]
+    fn reordering_listeners_does_not_block_an_unrelated_command() {
+        let mut state = runtime_state();
+        assert!(matches!(
+            state
+                .dispatcher
+                .dispatch(intent(0, CommandKind::Timeout, "lock")),
+            DispatchDecision::Spawn(_)
+        ));
+        let mut config = runtime_config();
+        config.listeners.reverse();
+
+        assert_runtime_ok(state.apply_config(&config));
+
+        assert!(matches!(
+            state
+                .dispatcher
+                .dispatch(intent(0, CommandKind::Timeout, "outputs off")),
+            DispatchDecision::Spawn(_)
+        ));
+    }
+
+    #[test]
+    fn reordering_listeners_keeps_a_running_lock_suppressed() {
+        let mut state = runtime_state();
+        assert!(matches!(
+            state
+                .dispatcher
+                .dispatch(intent(0, CommandKind::Timeout, "lock")),
+            DispatchDecision::Spawn(_)
+        ));
+        let mut config = runtime_config();
+        config.listeners.reverse();
+
+        assert_runtime_ok(state.apply_config(&config));
+
+        assert!(matches!(
+            state
+                .dispatcher
+                .dispatch(intent(1, CommandKind::Timeout, "lock")),
+            DispatchDecision::Skip(_)
+        ));
+    }
+
+    #[test]
+    fn changing_a_listener_does_not_reuse_its_old_command_slot() {
+        let mut state = runtime_state();
+        assert!(matches!(
+            state
+                .dispatcher
+                .dispatch(intent(0, CommandKind::Timeout, "lock")),
+            DispatchDecision::Spawn(_)
+        ));
+        let mut config = runtime_config();
+        config.listeners[0].on_timeout = Some("new lock".to_string());
+
+        assert_runtime_ok(state.apply_config(&config));
+
+        assert!(matches!(
+            state
+                .dispatcher
+                .dispatch(intent(0, CommandKind::Timeout, "new lock")),
+            DispatchDecision::Spawn(_)
+        ));
+    }
+
+    #[test]
+    fn unchanged_listeners_keep_running_slots_across_a_reload() {
+        let mut state = runtime_state();
+        assert!(matches!(
+            state
+                .dispatcher
+                .dispatch(intent(0, CommandKind::Timeout, "lock")),
+            DispatchDecision::Spawn(_)
+        ));
+        let mut config = runtime_config();
+        config.general.after_resume_command = Some("new hook".to_string());
+
+        assert_runtime_ok(state.apply_config(&config));
+
+        assert!(matches!(
+            state
+                .dispatcher
+                .dispatch(intent(0, CommandKind::Timeout, "lock")),
+            DispatchDecision::Skip(_)
+        ));
+    }
+
+    #[test]
+    fn failed_reconfiguration_keeps_the_running_listener_slot() {
+        let mut state = runtime_state();
+        assert!(matches!(
+            state
+                .dispatcher
+                .dispatch(intent(0, CommandKind::Timeout, "lock")),
+            DispatchDecision::Spawn(_)
+        ));
+        let mut config = runtime_config();
+        config.listeners[0].on_timeout = Some("new lock".to_string());
+        config.listeners[0].timeout_seconds = u64::MAX;
+
+        assert!(state.apply_config(&config).is_err());
+
+        assert!(matches!(
+            state
+                .dispatcher
+                .dispatch(intent(0, CommandKind::Timeout, "lock")),
+            DispatchDecision::Skip(_)
+        ));
     }
 
     #[test]
@@ -1727,7 +1840,17 @@ mod tests {
     }
 
     fn runtime_state() -> RuntimeState {
-        let config = Config {
+        let config = runtime_config();
+        RuntimeState::new(
+            IdleWaylandState::default(),
+            ListenerSet::from_config(&config),
+            &config,
+            None,
+        )
+    }
+
+    fn runtime_config() -> Config {
+        Config {
             general: GeneralConfig::default(),
             idle_hint_timeout_seconds: None,
             listeners: vec![
@@ -1744,14 +1867,7 @@ mod tests {
                     ignore_inhibit: false,
                 },
             ],
-        };
-
-        RuntimeState::new(
-            IdleWaylandState::default(),
-            ListenerSet::from_config(&config),
-            &config,
-            None,
-        )
+        }
     }
 
     fn runtime_state_with_ignored_listener() -> RuntimeState {

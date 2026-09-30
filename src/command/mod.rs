@@ -88,11 +88,11 @@ impl CommandDispatcher {
         command: String,
     ) -> DispatchDecision {
         // one running command occupies each listener event or session hook slot
-        let slot = CommandSlot { context };
+        let slot = Some(CommandSlot { context });
 
         if let Some(command) = self.running.iter().find(|command| command.slot == slot) {
             return DispatchDecision::Skip(SkipDecision {
-                context: slot.context,
+                context,
                 reason: SkipReason::AlreadyRunning(command.command_id),
             });
         }
@@ -103,13 +103,14 @@ impl CommandDispatcher {
 
         self.running.push(RunningCommand {
             command_id,
+            context,
             slot,
             command: command.clone(),
         });
 
         DispatchDecision::Spawn(SpawnRequest {
             command_id,
-            context: slot.context,
+            context,
             command,
         })
     }
@@ -130,7 +131,7 @@ impl CommandDispatcher {
 
         Ok(FinishedCommand {
             command_id,
-            context: command.slot.context,
+            context: command.context,
             command: command.command,
         })
     }
@@ -141,6 +142,26 @@ impl CommandDispatcher {
 
     pub fn is_empty(&self) -> bool {
         self.running.is_empty()
+    }
+
+    pub(crate) fn remap_listener_slots(&mut self, mapping: &[Option<ListenerId>]) {
+        for command in &mut self.running {
+            let Some(CommandSlot {
+                context: CommandContext::Listener { listener_id, kind },
+            }) = command.slot
+            else {
+                continue;
+            };
+
+            // removed or changed listeners retain their process but release their slot
+            command.slot = mapping
+                .get(listener_id.index())
+                .copied()
+                .flatten()
+                .map(|listener_id| CommandSlot {
+                    context: CommandContext::Listener { listener_id, kind },
+                });
+        }
     }
 }
 
@@ -164,7 +185,8 @@ struct CommandSlot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunningCommand {
     command_id: CommandId,
-    slot: CommandSlot,
+    context: CommandContext,
+    slot: Option<CommandSlot>,
     command: String,
 }
 
@@ -252,6 +274,94 @@ mod tests {
             DispatchDecision::Spawn(_)
         ));
         assert_eq!(dispatcher.running_count(), 4);
+    }
+
+    #[test]
+    fn listener_slots_follow_reordering_and_keep_their_original_metadata() {
+        let mut dispatcher = CommandDispatcher::default();
+        for kind in [CommandKind::Timeout, CommandKind::Resume] {
+            let DispatchDecision::Spawn(start) = dispatcher.dispatch(intent(0, kind, "hook"))
+            else {
+                panic!("expected the listener hook to start");
+            };
+            dispatcher.remap_listener_slots(&[Some(ListenerId::from_index(1))]);
+
+            assert_eq!(
+                dispatcher.dispatch(intent(1, kind, "hook")),
+                DispatchDecision::Skip(SkipDecision {
+                    context: listener_context(1, kind),
+                    reason: SkipReason::AlreadyRunning(start.command_id),
+                })
+            );
+            assert_eq!(
+                dispatcher.finish(start.command_id),
+                Ok(FinishedCommand {
+                    command_id: start.command_id,
+                    context: listener_context(0, kind),
+                    command: "hook".to_string(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn session_slots_remain_busy_when_listeners_change() {
+        let mut dispatcher = CommandDispatcher::default();
+        for context in [
+            CommandContext::Lock,
+            CommandContext::Unlock,
+            CommandContext::BeforeSleep,
+            CommandContext::AfterResume,
+        ] {
+            let DispatchDecision::Spawn(start) =
+                dispatcher.dispatch_command(context, "hook".to_string())
+            else {
+                panic!("expected the session hook to start");
+            };
+            dispatcher.remap_listener_slots(&[]);
+
+            assert_eq!(
+                dispatcher.dispatch_command(context, "new hook".to_string()),
+                DispatchDecision::Skip(SkipDecision {
+                    context,
+                    reason: SkipReason::AlreadyRunning(start.command_id),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn completing_a_removed_listener_does_not_release_a_replacement_slot() {
+        let mut dispatcher = CommandDispatcher::default();
+        let DispatchDecision::Spawn(old) =
+            dispatcher.dispatch(intent(0, CommandKind::Timeout, "old"))
+        else {
+            panic!("expected the old hook to start");
+        };
+        dispatcher.remap_listener_slots(&[None]);
+        let DispatchDecision::Spawn(new) =
+            dispatcher.dispatch(intent(0, CommandKind::Timeout, "new"))
+        else {
+            panic!("expected the replacement hook to start");
+        };
+        // later reloads must not attach a retired slot to a reintroduced listener
+        dispatcher.remap_listener_slots(&[Some(ListenerId::from_index(0))]);
+        assert_eq!(
+            dispatcher.finish(old.command_id),
+            Ok(FinishedCommand {
+                command_id: old.command_id,
+                context: listener_context(0, CommandKind::Timeout),
+                command: "old".to_string(),
+            })
+        );
+
+        assert_eq!(
+            dispatcher.dispatch(intent(0, CommandKind::Timeout, "new")),
+            DispatchDecision::Skip(SkipDecision {
+                context: listener_context(0, CommandKind::Timeout),
+                reason: SkipReason::AlreadyRunning(new.command_id),
+            })
+        );
     }
 
     #[test]
