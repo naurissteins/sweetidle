@@ -168,6 +168,27 @@ impl ListenerSet {
             .collect()
     }
 
+    pub(crate) fn matching_listener_ids(&self, candidate: &Self) -> Vec<Option<ListenerId>> {
+        let mut matched = vec![false; candidate.listeners.len()];
+        self.listeners
+            .iter()
+            .map(|listener| {
+                // match duplicate definitions in config order without comparing idle phase
+                let index = candidate
+                    .listeners
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, next)| {
+                        (!matched[index] && listener.same_definition(next)).then_some(index)
+                    });
+                if let Some(index) = index {
+                    matched[index] = true;
+                }
+                index.map(ListenerId)
+            })
+            .collect()
+    }
+
     fn mark_active_matching(
         &mut self,
         mut matches: impl FnMut(&ListenerState) -> bool,
@@ -211,6 +232,15 @@ struct ListenerState {
     phase: ListenerPhase,
 }
 
+impl ListenerState {
+    fn same_definition(&self, other: &Self) -> bool {
+        self.timeout == other.timeout
+            && self.on_timeout == other.on_timeout
+            && self.on_resume == other.on_resume
+            && self.inhibit_policy == other.inhibit_policy
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ListenerPhase {
     Armed,
@@ -243,6 +273,31 @@ mod tests {
             set.timeout_requests()[1].inhibit_policy,
             InhibitPolicy::Respect
         );
+    }
+
+    #[test]
+    fn matches_duplicate_definitions_once_each_without_resetting_idle_phase() {
+        let mut config = sample_config();
+        config.listeners.push(config.listeners[0].clone());
+        let mut active = ListenerSet::from_config(&config);
+        assert!(active.mark_timed_out(ListenerId(0)).is_ok());
+        config.listeners.swap(0, 1);
+
+        assert_eq!(
+            active.matching_listener_ids(&ListenerSet::from_config(&config)),
+            vec![
+                Some(ListenerId(1)),
+                Some(ListenerId(0)),
+                Some(ListenerId(2))
+            ]
+        );
+        config.listeners.remove(0);
+        config.listeners.pop();
+        assert_eq!(
+            active.matching_listener_ids(&ListenerSet::from_config(&config)),
+            vec![Some(ListenerId(0)), None, None]
+        );
+        assert_eq!(active.status()[0].phase, super::ListenerPhase::TimedOut);
     }
 
     #[test]
