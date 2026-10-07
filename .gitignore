@@ -7,6 +7,7 @@
 *.swo
 
 # Local environment
+.direnv/
 .env
 .env.*
 
