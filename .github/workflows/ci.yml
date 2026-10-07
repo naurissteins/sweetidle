@@ -31,10 +31,6 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libsystemd-dev libwayland-dev pkg-config
       - run: cargo clippy --all-targets -- -D warnings
 
   check:
@@ -45,10 +41,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libsystemd-dev libwayland-dev pkg-config
       - run: cargo check
 
   test:
@@ -59,10 +51,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libsystemd-dev libwayland-dev pkg-config
       - run: cargo test
 
   reload-integration:
@@ -74,10 +62,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libsystemd-dev libwayland-dev pkg-config
       - name: Test configuration reload
         run: cargo test --locked --test reload -- --ignored --test-threads=1
 
@@ -101,8 +85,4 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libsystemd-dev libwayland-dev pkg-config
       - run: cargo build --release
