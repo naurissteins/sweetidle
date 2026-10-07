@@ -22,7 +22,7 @@ use crate::{
     control::ControlMonitor,
     listener::ListenerSet,
     session::{DbusInhibitMonitor, LogindFeatures, LogindMonitor, SystemdIdleInhibitor},
-    wayland::{IdleWaylandConnection, IdleWaylandError},
+    wayland::{IdleWaylandError, IdleWaylandParts},
 };
 
 #[derive(Debug)]
@@ -89,30 +89,17 @@ pub struct IdleRuntime {
     event_loop: EventLoop<'static, RuntimeState>,
     state: RuntimeState,
     integration_features: IntegrationFeatures,
-    _reload: Option<ConfigReloadMonitor>,
+    _reload: ConfigReloadMonitor,
     logind: Option<LogindMonitor>,
     _dbus_inhibit: Option<DbusInhibitMonitor>,
     _control: ControlMonitor,
 }
 
 impl IdleRuntime {
-    pub fn connect(config: &Config) -> Result<Self, RuntimeError> {
-        Self::connect_inner(config, None)
-    }
-
-    pub fn connect_with_config_path(
-        config: &Config,
-        config_path: PathBuf,
-    ) -> Result<Self, RuntimeError> {
-        Self::connect_inner(config, Some(config_path))
-    }
-
-    fn connect_inner(config: &Config, config_path: Option<PathBuf>) -> Result<Self, RuntimeError> {
+    pub fn connect(config: &Config, config_path: PathBuf) -> Result<Self, RuntimeError> {
         let listeners = ListenerSet::from_config(config);
         let idle_hint_timeout = config.idle_hint_timeout_seconds.map(Duration::from_secs);
-        let wayland =
-            IdleWaylandConnection::connect(&listeners.timeout_requests(), idle_hint_timeout)?;
-        let parts = wayland.into_parts();
+        let parts = IdleWaylandParts::connect(&listeners.timeout_requests(), idle_hint_timeout)?;
         let event_loop = EventLoop::try_new().map_err(RuntimeError::CreateEventLoop)?;
         let source = WaylandSource::new(parts.connection, parts.event_queue);
 
@@ -123,14 +110,14 @@ impl IdleRuntime {
             })
             .map_err(|error| RuntimeError::RegisterWayland(error.error))?;
         let (reload, reload_requester) = register_reload(config_path, &event_loop)?;
-        register_sources(&event_loop.handle(), reload_requester.is_some())?;
+        register_sources(&event_loop.handle())?;
         let logind = register_logind(config, &event_loop)?;
         let dbus_inhibit = register_dbus_inhibit(config, &event_loop)?;
         let control = register_control(&event_loop)?;
 
         Ok(Self {
             event_loop,
-            state: RuntimeState::new(parts.state, listeners, config, reload_requester),
+            state: RuntimeState::new(parts.state, listeners, config, Some(reload_requester)),
             integration_features: IntegrationFeatures::from_config(config),
             _reload: reload,
             logind,
@@ -244,13 +231,10 @@ fn reload_restart_reason(
 }
 
 fn register_reload(
-    config_path: Option<PathBuf>,
+    config_path: PathBuf,
     event_loop: &EventLoop<'static, RuntimeState>,
-) -> Result<(Option<ConfigReloadMonitor>, Option<ConfigReloadRequester>), RuntimeError> {
-    let Some(path) = config_path else {
-        return Ok((None, None));
-    };
-    let (monitor, requester, source) = ConfigReloadMonitor::connect(path)?;
+) -> Result<(ConfigReloadMonitor, ConfigReloadRequester), RuntimeError> {
+    let (monitor, requester, source) = ConfigReloadMonitor::connect(config_path)?;
     event_loop
         .handle()
         .insert_source(source, |event, _, state: &mut RuntimeState| match event {
@@ -259,7 +243,7 @@ fn register_reload(
         })
         .map_err(|error| RuntimeError::RegisterReload(error.error))?;
 
-    Ok((Some(monitor), Some(requester)))
+    Ok((monitor, requester))
 }
 
 fn register_dbus_inhibit(

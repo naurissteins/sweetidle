@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use sweetsidle::{
-    command::ProcessError,
+    ProcessError,
     config::Config,
     control,
     runtime::{ConfigReloadOutcome, IdleRuntime, RuntimeEvent},
@@ -172,7 +172,7 @@ fn run_daemon(path: Option<PathBuf>, verbose: bool) -> Result<(), String> {
     init_logging(verbose)?;
     let loaded = load_config(path)?;
     let mut active_config = loaded.config;
-    let mut runtime = IdleRuntime::connect_with_config_path(&active_config, loaded.path.clone())
+    let mut runtime = IdleRuntime::connect(&active_config, loaded.path.clone())
         .map_err(|error| error.to_string())?;
 
     info!(

@@ -32,13 +32,10 @@ impl ShutdownSignal {
 
 pub(super) fn register_sources(
     handle: &LoopHandle<'static, RuntimeState>,
-    reload_enabled: bool,
 ) -> Result<(), RuntimeError> {
     register_source(handle, RuntimeSignal::Interrupt)?;
     register_source(handle, RuntimeSignal::Terminate)?;
-    if reload_enabled {
-        register_source(handle, RuntimeSignal::Reload)?;
-    }
+    register_source(handle, RuntimeSignal::Reload)?;
 
     Ok(())
 }

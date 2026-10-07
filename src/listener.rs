@@ -213,14 +213,6 @@ impl ListenerSet {
 
         intents
     }
-
-    pub fn len(&self) -> usize {
-        self.listeners.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.listeners.is_empty()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,7 +252,7 @@ mod tests {
     fn exposes_timeout_requests_in_config_order() {
         let set = ListenerSet::from_config(&sample_config());
 
-        assert_eq!(set.len(), 2);
+        assert_eq!(set.timeout_requests().len(), 2);
         assert_eq!(set.timeout_requests()[0].listener_id.index(), 0);
         assert_eq!(set.timeout_requests()[0].timeout, Duration::from_secs(300));
         assert_eq!(

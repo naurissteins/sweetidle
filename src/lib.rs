@@ -1,8 +1,10 @@
 // keep platform adapters separate from listener and configuration policy
-pub mod command;
+mod command;
 pub mod config;
 pub mod control;
-pub mod listener;
+mod listener;
 pub mod runtime;
-pub mod session;
-pub mod wayland;
+mod session;
+mod wayland;
+
+pub use command::ProcessError;

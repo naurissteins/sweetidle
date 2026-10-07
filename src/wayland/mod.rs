@@ -1,5 +1,5 @@
-// keep protocol dispatch behind the idle connection interface
+// keep protocol bindings and dispatch behind the idle adapter
 mod idle;
 
-pub(crate) use idle::IdleWaylandState;
-pub use idle::{IdleEvent, IdleWaylandConnection, IdleWaylandError};
+pub use idle::IdleWaylandError;
+pub(crate) use idle::{IdleEvent, IdleWaylandParts, IdleWaylandState};
