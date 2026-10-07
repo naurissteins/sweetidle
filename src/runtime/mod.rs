@@ -1,5 +1,6 @@
 mod commands;
 mod error;
+mod inhibition;
 mod reload;
 mod shutdown;
 mod state;
