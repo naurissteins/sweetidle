@@ -57,7 +57,6 @@ pub enum SkipReason {
 pub struct FinishedCommand {
     pub command_id: CommandId,
     pub context: CommandContext,
-    pub command: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,7 +104,6 @@ impl CommandDispatcher {
             command_id,
             context,
             slot,
-            command: command.clone(),
         });
 
         DispatchDecision::Spawn(SpawnRequest {
@@ -132,7 +130,6 @@ impl CommandDispatcher {
         Ok(FinishedCommand {
             command_id,
             context: command.context,
-            command: command.command,
         })
     }
 
@@ -187,7 +184,6 @@ struct RunningCommand {
     command_id: CommandId,
     context: CommandContext,
     slot: Option<CommandSlot>,
-    command: String,
 }
 
 #[cfg(test)]
@@ -298,7 +294,6 @@ mod tests {
                 Ok(FinishedCommand {
                     command_id: start.command_id,
                     context: listener_context(0, kind),
-                    command: "hook".to_string(),
                 })
             );
         }
@@ -351,7 +346,6 @@ mod tests {
             Ok(FinishedCommand {
                 command_id: old.command_id,
                 context: listener_context(0, CommandKind::Timeout),
-                command: "old".to_string(),
             })
         );
 
@@ -377,7 +371,6 @@ mod tests {
             Ok(FinishedCommand {
                 command_id: CommandId(0),
                 context: listener_context(0, CommandKind::Timeout),
-                command: "lock".to_string()
             })
         );
         assert!(dispatcher.is_empty());
