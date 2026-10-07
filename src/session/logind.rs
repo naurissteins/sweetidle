@@ -1,57 +1,19 @@
 use std::{
     error::Error,
-    fmt,
-    future::pending,
-    io,
+    fmt, io,
     sync::mpsc::{self, SyncSender},
     thread::{self, JoinHandle},
 };
 
 use async_channel::{Receiver, Sender, bounded, unbounded};
 use calloop::channel::{Channel, Sender as EventSender, channel};
-use futures_lite::{StreamExt, future};
-use zbus::{
-    Connection, Message, proxy,
-    zvariant::{OwnedFd, OwnedObjectPath},
-};
+use zbus::zvariant::OwnedFd;
 
-use super::{LogindInhibitor, SystemdIdleInhibitor, idle_block_inhibitors};
+use super::SystemdIdleInhibitor;
 
+mod proxy;
 mod signals;
-
-#[proxy(
-    interface = "org.freedesktop.login1.Manager",
-    default_service = "org.freedesktop.login1",
-    default_path = "/org/freedesktop/login1",
-    gen_blocking = false
-)]
-trait LogindManager {
-    fn get_session(&self, session_id: &str) -> zbus::Result<OwnedObjectPath>;
-
-    fn get_session_by_pid(&self, pid: u32) -> zbus::Result<OwnedObjectPath>;
-
-    fn inhibit(&self, what: &str, who: &str, why: &str, mode: &str) -> zbus::Result<OwnedFd>;
-
-    fn list_inhibitors(&self) -> zbus::Result<Vec<LogindInhibitor>>;
-
-    #[zbus(signal)]
-    fn prepare_for_sleep(&self, active: bool) -> zbus::Result<()>;
-
-    #[zbus(property)]
-    fn preparing_for_sleep(&self) -> zbus::Result<bool>;
-
-    #[zbus(property)]
-    fn block_inhibited(&self) -> zbus::Result<String>;
-}
-
-#[proxy(
-    interface = "org.freedesktop.login1.Session",
-    default_service = "org.freedesktop.login1",
-    gen_blocking = false
-)]
-trait LogindSession {
-    fn set_idle_hint(&self, idle: bool) -> zbus::Result<()>;
-}
+mod worker;
 
 #[derive(Debug)]
 pub(crate) struct DelayInhibitor {
@@ -288,286 +250,19 @@ async fn worker_loop(
     requests: Receiver<SessionRequest>,
     shutdown: Receiver<()>,
 ) -> Result<(), SessionError> {
-    // dbus work stays off the Wayland event loop
-    let connection = match Connection::system().await {
-        Ok(connection) => connection,
-        Err(source) => return report_initialization_error(ready, SessionError::Connect(source)),
+    let mut worker = match worker::LogindWorker::open(features).await {
+        Ok(worker) => worker,
+        Err(error) => return report_initialization_error(ready, error),
     };
-    let proxy = match LogindManagerProxy::new(&connection).await {
-        Ok(proxy) => proxy,
-        Err(source) => {
-            return report_initialization_error(ready, SessionError::CreateProxy(source));
-        }
-    };
-    let mut sleep_signals = if features.sleep_events {
-        match proxy.receive_prepare_for_sleep().await {
-            Ok(signals) => Some(signals),
-            Err(source) => {
-                return report_initialization_error(ready, SessionError::Subscribe(source));
-            }
-        }
-    } else {
-        None
-    };
-    let session_proxy = if features.session_events || features.idle_hint {
-        let path = match resolve_session_path(&proxy).await {
-            Ok(path) => path,
-            Err(error) => return report_initialization_error(ready, error),
-        };
-        let builder = match LogindSessionProxy::builder(&connection).path(path) {
-            Ok(builder) => builder,
-            Err(source) => {
-                return report_initialization_error(
-                    ready,
-                    SessionError::CreateSessionProxy(source),
-                );
-            }
-        };
-        match builder.build().await {
-            Ok(proxy) => Some(proxy),
-            Err(source) => {
-                return report_initialization_error(
-                    ready,
-                    SessionError::CreateSessionProxy(source),
-                );
-            }
-        }
-    } else {
-        None
-    };
-    let mut session_signals = match (features.session_events, session_proxy.as_ref()) {
-        (true, Some(proxy)) => match signals::subscribe(proxy).await {
-            Ok(signals) => Some(signals),
-            Err(error) => {
-                return report_initialization_error(ready, error);
-            }
-        },
-        (false, _) | (true, None) => None,
-    };
-    let mut idle_inhibitor_changes = if features.idle_inhibitors {
-        Some(proxy.receive_block_inhibited_changed().await)
-    } else {
-        None
-    };
-    let mut idle_inhibitors = if features.idle_inhibitors {
-        match query_idle_inhibitors(&proxy).await {
-            Ok(inhibitors) => inhibitors,
-            Err(error) => return report_initialization_error(ready, error),
-        }
-    } else {
-        Vec::new()
-    };
-    let mut inhibitor = if features.delay_inhibitor {
-        match acquire_delay_inhibitor(&proxy).await {
-            Ok(inhibitor) => Some(inhibitor),
-            Err(error) => return report_initialization_error(ready, error),
-        }
-    } else {
-        None
-    };
-    let already_preparing = if features.sleep_events {
-        match proxy.preparing_for_sleep().await {
-            Ok(preparing) => preparing,
-            Err(source) => {
-                return report_initialization_error(ready, SessionError::QueryState(source));
-            }
-        }
-    } else {
-        false
-    };
-    if features.idle_hint
-        && let Err(error) = set_idle_hint(session_proxy.as_ref(), false).await
-    {
-        return report_initialization_error(ready, error);
-    }
-
-    if !idle_inhibitors.is_empty()
-        && events
-            .send(SessionEvent::SystemdIdleInhibitorsChanged(
-                idle_inhibitors.clone(),
-            ))
-            .is_err()
-    {
+    if worker.start(events, ready).is_break() {
         return Ok(());
     }
-    // report readiness only after subscriptions and the initial state are set
-    if ready.send(Ok(())).is_err() {
-        return Ok(());
-    }
-    if already_preparing
-        && events
-            .send(SessionEvent::PrepareForSleep(inhibitor.take()))
-            .is_err()
-    {
-        return Ok(());
-    }
-
     loop {
-        let next = future::race(
-            future::race(
-                async {
-                    match sleep_signals.as_mut() {
-                        Some(signals) => match signals.next().await {
-                            Some(signal) => WorkerInput::Sleep(
-                                signal
-                                    .args()
-                                    .map(|args| Some(*args.active()))
-                                    .map_err(SessionError::DecodeSignal),
-                            ),
-                            None => WorkerInput::Sleep(Ok(None)),
-                        },
-                        None => pending().await,
-                    }
-                },
-                async {
-                    match session_signals.as_mut() {
-                        Some(signals) => WorkerInput::Session(signals.next().await),
-                        None => pending().await,
-                    }
-                },
-            ),
-            future::race(
-                async {
-                    match idle_inhibitor_changes.as_mut() {
-                        Some(changes) => {
-                            WorkerInput::IdleInhibitorsChanged(changes.next().await.is_some())
-                        }
-                        None => pending().await,
-                    }
-                },
-                future::race(
-                    async {
-                        match requests.recv().await {
-                            Ok(request) => WorkerInput::Request(request),
-                            Err(_) => WorkerInput::Shutdown,
-                        }
-                    },
-                    async {
-                        let _ = shutdown.recv().await;
-                        WorkerInput::Shutdown
-                    },
-                ),
-            ),
-        )
-        .await;
-
-        match next {
-            WorkerInput::Sleep(Ok(Some(true))) => {
-                if events
-                    .send(SessionEvent::PrepareForSleep(inhibitor.take()))
-                    .is_err()
-                {
-                    return Ok(());
-                }
-            }
-            WorkerInput::Sleep(Ok(Some(false))) => {
-                if features.delay_inhibitor {
-                    inhibitor = Some(acquire_delay_inhibitor(&proxy).await?);
-                }
-                if events.send(SessionEvent::Resumed).is_err() {
-                    return Ok(());
-                }
-            }
-            WorkerInput::Sleep(Ok(None))
-            | WorkerInput::Session(None)
-            | WorkerInput::IdleInhibitorsChanged(false) => {
-                return Err(SessionError::Disconnected);
-            }
-            WorkerInput::Sleep(Err(error)) => return Err(error),
-            WorkerInput::Session(Some(signal)) => {
-                if let Some(event) = signals::decode(&signal)?
-                    && events.send(event).is_err()
-                {
-                    return Ok(());
-                }
-            }
-            WorkerInput::IdleInhibitorsChanged(true) => {
-                let next = query_idle_inhibitors(&proxy).await?;
-                if next != idle_inhibitors {
-                    idle_inhibitors = next;
-                    if events
-                        .send(SessionEvent::SystemdIdleInhibitorsChanged(
-                            idle_inhibitors.clone(),
-                        ))
-                        .is_err()
-                    {
-                        return Ok(());
-                    }
-                }
-            }
-            WorkerInput::Request(SessionRequest::SetIdleHint(idle)) => {
-                set_idle_hint(session_proxy.as_ref(), idle).await?;
-            }
-            WorkerInput::Shutdown => {
-                if features.idle_hint {
-                    set_idle_hint(session_proxy.as_ref(), false).await?;
-                }
-                return Ok(());
-            }
+        let input = worker.next_input(&requests, &shutdown).await;
+        if worker.handle(input, events).await?.is_break() {
+            return Ok(());
         }
     }
-}
-
-async fn resolve_session_path(
-    manager: &LogindManagerProxy<'_>,
-) -> Result<OwnedObjectPath, SessionError> {
-    let mut by_session_id = None;
-    if let Some(session_id) = std::env::var_os("XDG_SESSION_ID")
-        .and_then(|value| value.into_string().ok())
-        .filter(|value| !value.is_empty())
-    {
-        match manager.get_session(&session_id).await {
-            Ok(path) => return Ok(path),
-            Err(error) => by_session_id = Some(Box::new(error)),
-        }
-    }
-
-    manager
-        .get_session_by_pid(std::process::id())
-        .await
-        .map_err(|by_process_id| SessionError::ResolveSession {
-            by_session_id,
-            by_process_id: Box::new(by_process_id),
-        })
-}
-
-async fn acquire_delay_inhibitor(
-    proxy: &LogindManagerProxy<'_>,
-) -> Result<DelayInhibitor, SessionError> {
-    proxy
-        .inhibit(
-            "sleep",
-            "sweetsidle",
-            "run the configured before-sleep command",
-            "delay",
-        )
-        .await
-        .map(DelayInhibitor::new)
-        .map_err(SessionError::Inhibit)
-}
-
-async fn set_idle_hint(
-    proxy: Option<&LogindSessionProxy<'_>>,
-    idle: bool,
-) -> Result<(), SessionError> {
-    let Some(proxy) = proxy else {
-        return Err(SessionError::RequestChannelClosed);
-    };
-
-    proxy
-        .set_idle_hint(idle)
-        .await
-        .map_err(SessionError::SetIdleHint)
-}
-
-async fn query_idle_inhibitors(
-    proxy: &LogindManagerProxy<'_>,
-) -> Result<Vec<SystemdIdleInhibitor>, SessionError> {
-    proxy
-        .list_inhibitors()
-        .await
-        .map(idle_block_inhibitors)
-        .map_err(SessionError::QueryInhibitors)
 }
 
 fn report_initialization_error<T>(
@@ -576,14 +271,6 @@ fn report_initialization_error<T>(
 ) -> Result<T, SessionError> {
     let _ = ready.send(Err(error));
     Err(SessionError::WorkerInitializationStopped)
-}
-
-enum WorkerInput {
-    Sleep(Result<Option<bool>, SessionError>),
-    Session(Option<Message>),
-    IdleInhibitorsChanged(bool),
-    Request(SessionRequest),
-    Shutdown,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -599,7 +286,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::{LogindFeatures, LogindManagerProxy, LogindMonitor, SessionEvent};
+    use super::{LogindFeatures, LogindMonitor, SessionEvent, proxy::LogindManagerProxy};
 
     #[test]
     #[ignore = "requires access to systemd-logind"]
@@ -636,10 +323,10 @@ mod tests {
             let manager = LogindManagerProxy::new(&connection)
                 .await
                 .unwrap_or_else(|error| panic!("failed to create manager proxy: {error}"));
-            let path = super::resolve_session_path(&manager)
+            let path = super::proxy::resolve_session_path(&manager)
                 .await
                 .unwrap_or_else(|error| panic!("failed to resolve test session: {error}"));
-            let session = super::LogindSessionProxy::builder(&connection)
+            let session = super::proxy::LogindSessionProxy::builder(&connection)
                 .path(path)
                 .unwrap_or_else(|error| panic!("invalid session path: {error}"))
                 .build()
