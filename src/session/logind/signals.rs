@@ -1,6 +1,6 @@
 use zbus::{Message, proxy::SignalStream};
 
-use super::{LogindSessionProxy, SessionError, SessionEvent};
+use super::{SessionError, SessionEvent, proxy::LogindSessionProxy};
 
 pub(super) async fn subscribe(
     proxy: &LogindSessionProxy<'_>,
