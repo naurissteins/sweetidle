@@ -1,7 +1,10 @@
+mod commands;
 mod error;
 mod reload;
 mod shutdown;
 mod state;
+#[cfg(test)]
+mod test_support;
 
 use std::{path::PathBuf, time::Duration};
 
