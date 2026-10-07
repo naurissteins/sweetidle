@@ -35,7 +35,6 @@ pub struct RunningProcessInfo {
 pub enum ProcessError {
     Spawn {
         command_id: CommandId,
-        command: String,
         source: io::Error,
     },
     Wait {
@@ -45,7 +44,7 @@ pub enum ProcessError {
 }
 
 impl ProcessAdapter {
-    pub fn spawn(&mut self, request: SpawnRequest) -> Result<ProcessStart, ProcessError> {
+    pub fn spawn(&mut self, request: &SpawnRequest) -> Result<ProcessStart, ProcessError> {
         // configured commands use the shell and discard standard streams
         let child = Command::new("sh")
             .arg("-c")
@@ -58,7 +57,6 @@ impl ProcessAdapter {
             .spawn()
             .map_err(|source| ProcessError::Spawn {
                 command_id: request.command_id,
-                command: request.command.clone(),
                 source,
             })?;
 
@@ -127,13 +125,9 @@ impl ProcessAdapter {
 impl fmt::Display for ProcessError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Spawn {
-                command_id,
-                command,
-                source,
-            } => write!(
+            Self::Spawn { command_id, source } => write!(
                 formatter,
-                "failed to spawn command {} (`{command}`): {source}",
+                "failed to spawn command {}: {source}",
                 command_id.index()
             ),
             Self::Wait { command_id, source } => {
@@ -175,7 +169,7 @@ mod tests {
     fn spawns_and_collects_a_finished_command() {
         let mut processes = ProcessAdapter::default();
 
-        let start = match processes.spawn(request(0, "exit 0")) {
+        let start = match processes.spawn(&request(0, "exit 0")) {
             Ok(start) => start,
             Err(error) => panic!("{error}"),
         };
@@ -194,7 +188,7 @@ mod tests {
     fn preserves_non_zero_exit_status() {
         let mut processes = ProcessAdapter::default();
 
-        match processes.spawn(request(1, "exit 7")) {
+        match processes.spawn(&request(1, "exit 7")) {
             Ok(_) => {}
             Err(error) => panic!("{error}"),
         }
@@ -209,7 +203,7 @@ mod tests {
     fn reports_running_processes() {
         let mut processes = ProcessAdapter::default();
 
-        let start = match processes.spawn(request(2, "sleep 0.05")) {
+        let start = match processes.spawn(&request(2, "sleep 0.05")) {
             Ok(start) => start,
             Err(error) => panic!("{error}"),
         };
@@ -228,7 +222,7 @@ mod tests {
     #[test]
     fn starts_commands_in_their_own_process_group() -> Result<(), Box<dyn std::error::Error>> {
         let mut processes = ProcessAdapter::default();
-        processes.spawn(request(3, "exec sleep 1"))?;
+        processes.spawn(&request(3, "exec sleep 1"))?;
         let child = &mut processes.running[0].child;
         let pid = Pid::from_child(child);
         let group = getpgid(Some(pid));
@@ -238,6 +232,30 @@ mod tests {
         child.wait()?;
 
         assert_eq!(group?, pid);
+        Ok(())
+    }
+
+    #[test]
+    fn spawn_failure_keeps_io_details_without_command_text()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut processes = ProcessAdapter::default();
+        let error = match processes.spawn(&request(4, "printf secret-command-token\0")) {
+            Ok(start) => panic!("unexpected process start: {start:?}"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            &error,
+            super::ProcessError::Spawn { command_id, .. } if *command_id == CommandId(4)
+        ));
+        assert!(error.to_string().contains("failed to spawn command 4"));
+        assert!(!error.to_string().contains("secret-command-token"));
+        assert!(!format!("{error:?}").contains("secret-command-token"));
+        let source = std::error::Error::source(&error)
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .ok_or("spawn failure lost its I/O source")?;
+        assert_eq!(source.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(processes.is_empty());
         Ok(())
     }
 

@@ -693,7 +693,7 @@ impl RuntimeState {
                         .push(inhibitor);
                 }
 
-                match self.processes.spawn(request.clone()) {
+                match self.processes.spawn(&request) {
                     Ok(start) => {
                         register_process_monitor(handle, start)?;
                         self.runtime_events
@@ -1766,6 +1766,32 @@ mod tests {
         ));
         let _ = wait_for_process_events(&mut event_loop, &mut state);
         assert!(state.delay_inhibitors.is_empty());
+        assert!(state.processes.is_empty());
+    }
+
+    #[test]
+    fn failed_sleep_hook_releases_its_slot_and_inhibitor_without_command_text() {
+        let event_loop = new_event_loop();
+        let mut state = runtime_state();
+        let (mut observer, inhibitor) = observable_inhibitor();
+        state.before_sleep_command = Some("printf secret-command-token\0".to_string());
+        state.record_session_event(SessionEvent::PrepareForSleep(Some(inhibitor)));
+
+        assert_runtime_ok(state.route_session_events());
+        assert_runtime_ok(state.dispatch_command_intents(&event_loop.handle()));
+
+        let events = state.take_runtime_events();
+        assert!(matches!(
+            events.as_slice(),
+            [RuntimeEvent::PreparingForSleep, RuntimeEvent::CommandFailed { command, error }]
+                if command.context == CommandContext::BeforeSleep
+                    && matches!(error, crate::command::ProcessError::Spawn { command_id, .. }
+                        if *command_id == command.command_id)
+        ));
+        assert!(!format!("{events:?}").contains("secret-command-token"));
+        assert_inhibitor_released(&mut observer);
+        assert!(state.delay_inhibitors.is_empty());
+        assert!(state.dispatcher.is_empty());
         assert!(state.processes.is_empty());
     }
 
