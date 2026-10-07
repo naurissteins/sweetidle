@@ -25,6 +25,7 @@ pub struct ProcessCompletion {
     pub status: ExitStatus,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningProcessInfo {
     pub command_id: CommandId,
@@ -63,7 +64,6 @@ impl ProcessAdapter {
         let process_id = child.id();
         self.running.push(RunningProcess {
             command_id: request.command_id,
-            process_id,
             child,
         });
 
@@ -103,20 +103,23 @@ impl ProcessAdapter {
         Ok(finished)
     }
 
+    #[cfg(test)]
     pub fn running_processes(&self) -> Vec<RunningProcessInfo> {
         self.running
             .iter()
             .map(|process| RunningProcessInfo {
                 command_id: process.command_id,
-                process_id: process.process_id,
+                process_id: process.child.id(),
             })
             .collect()
     }
 
+    #[cfg(test)]
     pub fn running_count(&self) -> usize {
         self.running.len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.running.is_empty()
     }
@@ -152,7 +155,6 @@ impl Error for ProcessError {
 #[derive(Debug)]
 struct RunningProcess {
     command_id: CommandId,
-    process_id: u32,
     child: Child,
 }
 

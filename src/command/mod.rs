@@ -4,9 +4,7 @@ use crate::listener::{CommandIntent, CommandKind, ListenerId};
 
 mod process;
 
-pub use process::{
-    ProcessAdapter, ProcessCompletion, ProcessError, ProcessStart, RunningProcessInfo,
-};
+pub use process::{ProcessAdapter, ProcessCompletion, ProcessError, ProcessStart};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CommandId(usize);
@@ -133,10 +131,12 @@ impl CommandDispatcher {
         })
     }
 
+    #[cfg(test)]
     pub fn running_count(&self) -> usize {
         self.running.len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.running.is_empty()
     }

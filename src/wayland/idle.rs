@@ -21,14 +21,14 @@ pub enum IdleEvent {
 }
 
 #[derive(Debug)]
-pub struct IdleWaylandConnection {
-    connection: Connection,
-    event_queue: EventQueue<IdleWaylandState>,
-    state: IdleWaylandState,
+pub(crate) struct IdleWaylandParts {
+    pub(crate) connection: Connection,
+    pub(crate) event_queue: EventQueue<IdleWaylandState>,
+    pub(crate) state: IdleWaylandState,
 }
 
-impl IdleWaylandConnection {
-    pub fn connect(
+impl IdleWaylandParts {
+    pub(crate) fn connect(
         requests: &[TimeoutRequest],
         idle_hint_timeout: Option<Duration>,
     ) -> Result<Self, IdleWaylandError> {
@@ -50,28 +50,6 @@ impl IdleWaylandConnection {
             state: IdleWaylandState::new(notifier, seat, queue_handle, requests, notifications),
         })
     }
-
-    pub fn dispatch_once(&mut self) -> Result<Vec<IdleEvent>, IdleWaylandError> {
-        self.event_queue
-            .blocking_dispatch(&mut self.state)
-            .map_err(IdleWaylandError::Dispatch)?;
-
-        Ok(self.state.take_events())
-    }
-
-    pub(crate) fn into_parts(self) -> IdleWaylandParts {
-        IdleWaylandParts {
-            connection: self.connection,
-            event_queue: self.event_queue,
-            state: self.state,
-        }
-    }
-}
-
-pub(crate) struct IdleWaylandParts {
-    pub(crate) connection: Connection,
-    pub(crate) event_queue: EventQueue<IdleWaylandState>,
-    pub(crate) state: IdleWaylandState,
 }
 
 #[derive(Debug)]
@@ -93,7 +71,6 @@ pub enum IdleWaylandError {
         advertised_version: u32,
     },
     Flush(wayland_client::backend::WaylandError),
-    Dispatch(wayland_client::DispatchError),
 }
 
 impl fmt::Display for IdleWaylandError {
@@ -137,7 +114,6 @@ impl fmt::Display for IdleWaylandError {
                     "failed to send idle notification requests: {source}"
                 )
             }
-            Self::Dispatch(source) => write!(formatter, "Wayland event dispatch failed: {source}"),
         }
     }
 }
@@ -149,7 +125,6 @@ impl Error for IdleWaylandError {
             Self::Globals(source) => Some(source),
             Self::Bind { source, .. } => Some(source),
             Self::Flush(source) => Some(source),
-            Self::Dispatch(source) => Some(source),
             Self::MissingGlobal(_)
             | Self::TimeoutTooLarge { .. }
             | Self::IdleHintTimeoutTooLarge(_)
