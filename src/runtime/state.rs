@@ -1,21 +1,14 @@
-use std::{
-    collections::{HashMap, HashSet},
-    io,
-    time::Duration,
-};
+use std::{collections::HashMap, time::Duration};
 
-use calloop::{Interest, LoopHandle, Mode, PostAction, generic::Generic};
-use rustix::process::{Pid, PidfdFlags, pidfd_open};
+use calloop::LoopHandle;
 
 use super::{
     RuntimeError, RuntimeEvent, ShutdownSignal,
+    commands::CommandRuntime,
     reload::{ConfigReloadEvent, ConfigReloadRequester},
 };
 use crate::{
-    command::{
-        CommandContext, CommandDispatcher, CommandId, DispatchDecision, ProcessAdapter,
-        ProcessStart, SkipReason,
-    },
+    command::CommandContext,
     config::Config,
     control::{ControlEvent, DbusInhibitorStatus, StatusSnapshot},
     listener::{CommandIntent, InhibitPolicy, ListenerSet},
@@ -54,11 +47,7 @@ pub(super) struct RuntimeState {
     idle_hint_state: Option<bool>,
     idle_hint_updates: Vec<bool>,
     preparing_for_sleep: bool,
-    delay_inhibitors: HashMap<CommandId, Vec<DelayInhibitor>>,
-    dispatcher: CommandDispatcher,
-    processes: ProcessAdapter,
-    ready_processes: Vec<CommandId>,
-    completed_before_monitor: HashSet<CommandId>,
+    pub(super) commands: CommandRuntime,
     runtime_events: Vec<RuntimeEvent>,
     shutdown: Option<ShutdownSignal>,
 }
@@ -99,11 +88,7 @@ impl RuntimeState {
             idle_hint_state: config.idle_hint_timeout_seconds.map(|_| false),
             idle_hint_updates: Vec::new(),
             preparing_for_sleep: false,
-            delay_inhibitors: HashMap::new(),
-            dispatcher: CommandDispatcher::default(),
-            processes: ProcessAdapter::default(),
-            ready_processes: Vec::new(),
-            completed_before_monitor: HashSet::new(),
+            commands: CommandRuntime::default(),
             runtime_events: Vec::new(),
             shutdown: None,
         }
@@ -132,7 +117,7 @@ impl RuntimeState {
             self.wayland.pause_notifications();
         }
 
-        self.dispatcher
+        self.commands
             .remap_listener_slots(&self.listeners.matching_listener_ids(&listeners));
         self.listeners = listeners;
         self.lock_command = config.general.lock_command.clone();
@@ -149,61 +134,26 @@ impl RuntimeState {
         handle: &LoopHandle<'static, RuntimeState>,
     ) -> Result<(), RuntimeError> {
         for intent in std::mem::take(&mut self.session_command_intents) {
-            let decision = self
-                .dispatcher
-                .dispatch_command(intent.context, intent.command);
-            self.dispatch_decision(handle, decision, intent.inhibitor)?;
+            self.commands.dispatch_session(
+                handle,
+                intent.context,
+                intent.command,
+                intent.inhibitor,
+                &mut self.runtime_events,
+            )?;
         }
 
         for intent in std::mem::take(&mut self.command_intents) {
-            let decision = self.dispatcher.dispatch(intent);
-            self.dispatch_decision(handle, decision, None)?;
+            self.commands
+                .dispatch_listener(handle, intent, &mut self.runtime_events)?;
         }
 
         Ok(())
     }
 
     pub(super) fn collect_ready_processes(&mut self) -> Result<(), RuntimeError> {
-        // children may finish before their pidfd source is registered
-        let ready = std::mem::take(&mut self.ready_processes);
-        if ready.is_empty() {
-            return Ok(());
-        }
-
-        let completions = self
-            .processes
-            .collect_finished()
-            .map_err(RuntimeError::Process)?;
-        let completed_ids = completions
-            .iter()
-            .map(|completion| completion.command_id)
-            .collect::<HashSet<_>>();
-
-        for completion in completions {
-            self.delay_inhibitors.remove(&completion.command_id);
-            let command = self
-                .dispatcher
-                .finish(completion.command_id)
-                .map_err(RuntimeError::CommandDispatch)?;
-            if !ready.contains(&completion.command_id) {
-                self.completed_before_monitor.insert(completion.command_id);
-            }
-            self.runtime_events.push(RuntimeEvent::CommandFinished {
-                command,
-                completion,
-            });
-        }
-
-        for command_id in ready {
-            if completed_ids.contains(&command_id)
-                || self.completed_before_monitor.remove(&command_id)
-            {
-                continue;
-            }
-            return Err(RuntimeError::ProcessNotReady(command_id));
-        }
-
-        Ok(())
+        self.commands
+            .collect_ready_processes(&mut self.runtime_events)
     }
 
     pub(super) fn take_runtime_events(&mut self) -> Vec<RuntimeEvent> {
@@ -438,7 +388,7 @@ impl RuntimeState {
                 SessionEvent::Resumed => {
                     self.preparing_for_sleep = false;
                     // this cycle is over even if its hook is still running or queued
-                    self.delay_inhibitors.clear();
+                    self.commands.release_sleep_inhibitors();
                     for intent in &mut self.session_command_intents {
                         intent.inhibitor = None;
                     }
@@ -566,10 +516,6 @@ impl RuntimeState {
         Ok(())
     }
 
-    fn mark_process_ready(&mut self, command_id: CommandId) {
-        self.ready_processes.push(command_id);
-    }
-
     fn update_dbus_inhibit_count(&mut self, active_count: usize) -> Result<(), RuntimeError> {
         let was_inhibited = self.idle_inhibited();
         self.active_dbus_inhibitors = active_count;
@@ -666,54 +612,6 @@ impl RuntimeState {
         self.runtime_events
             .push(RuntimeEvent::IdleHintChanged { idle });
     }
-
-    fn dispatch_decision(
-        &mut self,
-        handle: &LoopHandle<'static, RuntimeState>,
-        decision: DispatchDecision,
-        inhibitor: Option<DelayInhibitor>,
-    ) -> Result<(), RuntimeError> {
-        match decision {
-            DispatchDecision::Skip(decision) => {
-                if let Some(inhibitor) = inhibitor {
-                    let SkipReason::AlreadyRunning(command_id) = decision.reason;
-                    self.delay_inhibitors
-                        .entry(command_id)
-                        .or_default()
-                        .push(inhibitor);
-                }
-                self.runtime_events
-                    .push(RuntimeEvent::CommandSkipped(decision));
-            }
-            DispatchDecision::Spawn(request) => {
-                if let Some(inhibitor) = inhibitor {
-                    self.delay_inhibitors
-                        .entry(request.command_id)
-                        .or_default()
-                        .push(inhibitor);
-                }
-
-                match self.processes.spawn(&request) {
-                    Ok(start) => {
-                        register_process_monitor(handle, start)?;
-                        self.runtime_events
-                            .push(RuntimeEvent::CommandStarted(start));
-                    }
-                    Err(error) => {
-                        self.delay_inhibitors.remove(&request.command_id);
-                        let command = self
-                            .dispatcher
-                            .finish(request.command_id)
-                            .map_err(RuntimeError::CommandDispatch)?;
-                        self.runtime_events
-                            .push(RuntimeEvent::CommandFailed { command, error });
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
 }
 
 struct SessionCommandIntent {
@@ -731,54 +629,24 @@ pub(super) enum ReloadRequestOutcome {
     Failed,
 }
 
-fn register_process_monitor(
-    handle: &LoopHandle<'static, RuntimeState>,
-    start: ProcessStart,
-) -> Result<(), RuntimeError> {
-    let raw_pid = i32::try_from(start.process_id)
-        .ok()
-        .and_then(Pid::from_raw)
-        .ok_or(RuntimeError::InvalidProcessId(start.process_id))?;
-    let pidfd = pidfd_open(raw_pid, PidfdFlags::NONBLOCK).map_err(|source| {
-        RuntimeError::MonitorProcess {
-            command_id: start.command_id,
-            process_id: start.process_id,
-            source,
-        }
-    })?;
-    let command_id = start.command_id;
-
-    handle
-        .insert_source(
-            Generic::new(pidfd, Interest::READ, Mode::Level),
-            move |_, _, state: &mut RuntimeState| {
-                state.mark_process_ready(command_id);
-                Ok::<PostAction, io::Error>(PostAction::Remove)
-            },
-        )
-        .map_err(|error| RuntimeError::RegisterProcessMonitor {
-            command_id,
-            source: error.error,
-        })?;
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
-        fs::{self, File},
+        fs,
         io::{self, Read},
-        os::{fd::OwnedFd, unix::net::UnixStream},
         sync::mpsc,
         thread,
         time::{Duration, Instant},
     };
 
-    use calloop::EventLoop;
-
     use super::{ConfigReloadEvent, ReloadRequestOutcome, RuntimeState, SessionCommandIntent};
-    use crate::runtime::reload::ConfigReloadMonitor;
+    use crate::runtime::{
+        reload::ConfigReloadMonitor,
+        test_support::{
+            assert_inhibitor_released, new_event_loop, observable_inhibitor,
+            wait_for_process_events,
+        },
+    };
     use crate::{
         command::{CommandContext, DispatchDecision},
         config::{Config, GeneralConfig, ListenerConfig},
@@ -787,9 +655,7 @@ mod tests {
             CommandIntent, CommandKind, ListenerError, ListenerId, ListenerPhase, ListenerSet,
         },
         runtime::{RuntimeError, RuntimeEvent, ShutdownSignal},
-        session::{
-            DbusInhibitEvent, DelayInhibitor, InhibitorInfo, SessionEvent, SystemdIdleInhibitor,
-        },
+        session::{DbusInhibitEvent, InhibitorInfo, SessionEvent, SystemdIdleInhibitor},
         wayland::{IdleEvent, IdleWaylandState},
     };
 
@@ -936,8 +802,8 @@ mod tests {
         let mut state = runtime_state();
         assert!(matches!(
             state
-                .dispatcher
-                .dispatch(intent(0, CommandKind::Timeout, "lock")),
+                .commands
+                .reserve_listener(intent(0, CommandKind::Timeout, "lock")),
             DispatchDecision::Spawn(_)
         ));
         let mut config = runtime_config();
@@ -947,8 +813,8 @@ mod tests {
 
         assert!(matches!(
             state
-                .dispatcher
-                .dispatch(intent(0, CommandKind::Timeout, "outputs off")),
+                .commands
+                .reserve_listener(intent(0, CommandKind::Timeout, "outputs off")),
             DispatchDecision::Spawn(_)
         ));
     }
@@ -958,8 +824,8 @@ mod tests {
         let mut state = runtime_state();
         assert!(matches!(
             state
-                .dispatcher
-                .dispatch(intent(0, CommandKind::Timeout, "lock")),
+                .commands
+                .reserve_listener(intent(0, CommandKind::Timeout, "lock")),
             DispatchDecision::Spawn(_)
         ));
         let mut config = runtime_config();
@@ -969,8 +835,8 @@ mod tests {
 
         assert!(matches!(
             state
-                .dispatcher
-                .dispatch(intent(1, CommandKind::Timeout, "lock")),
+                .commands
+                .reserve_listener(intent(1, CommandKind::Timeout, "lock")),
             DispatchDecision::Skip(_)
         ));
     }
@@ -980,8 +846,8 @@ mod tests {
         let mut state = runtime_state();
         assert!(matches!(
             state
-                .dispatcher
-                .dispatch(intent(0, CommandKind::Timeout, "lock")),
+                .commands
+                .reserve_listener(intent(0, CommandKind::Timeout, "lock")),
             DispatchDecision::Spawn(_)
         ));
         let mut config = runtime_config();
@@ -991,8 +857,8 @@ mod tests {
 
         assert!(matches!(
             state
-                .dispatcher
-                .dispatch(intent(0, CommandKind::Timeout, "new lock")),
+                .commands
+                .reserve_listener(intent(0, CommandKind::Timeout, "new lock")),
             DispatchDecision::Spawn(_)
         ));
     }
@@ -1002,8 +868,8 @@ mod tests {
         let mut state = runtime_state();
         assert!(matches!(
             state
-                .dispatcher
-                .dispatch(intent(0, CommandKind::Timeout, "lock")),
+                .commands
+                .reserve_listener(intent(0, CommandKind::Timeout, "lock")),
             DispatchDecision::Spawn(_)
         ));
         let mut config = runtime_config();
@@ -1013,8 +879,8 @@ mod tests {
 
         assert!(matches!(
             state
-                .dispatcher
-                .dispatch(intent(0, CommandKind::Timeout, "lock")),
+                .commands
+                .reserve_listener(intent(0, CommandKind::Timeout, "lock")),
             DispatchDecision::Skip(_)
         ));
     }
@@ -1024,8 +890,8 @@ mod tests {
         let mut state = runtime_state();
         assert!(matches!(
             state
-                .dispatcher
-                .dispatch(intent(0, CommandKind::Timeout, "lock")),
+                .commands
+                .reserve_listener(intent(0, CommandKind::Timeout, "lock")),
             DispatchDecision::Spawn(_)
         ));
         let mut config = runtime_config();
@@ -1036,8 +902,8 @@ mod tests {
 
         assert!(matches!(
             state
-                .dispatcher
-                .dispatch(intent(0, CommandKind::Timeout, "lock")),
+                .commands
+                .reserve_listener(intent(0, CommandKind::Timeout, "lock")),
             DispatchDecision::Skip(_)
         ));
     }
@@ -1648,26 +1514,11 @@ mod tests {
     }
 
     #[test]
-    fn holds_the_sleep_inhibitor_until_the_command_finishes() {
-        let mut event_loop = new_event_loop();
-        let mut state = runtime_state();
-        state.before_sleep_command = Some("exit 0".to_string());
-        state.record_session_event(SessionEvent::PrepareForSleep(Some(test_inhibitor())));
-
-        assert_runtime_ok(state.route_session_events());
-        assert_runtime_ok(state.dispatch_command_intents(&event_loop.handle()));
-        assert_eq!(state.delay_inhibitors.len(), 1);
-        state.take_runtime_events();
-
-        let _ = wait_for_process_events(&mut event_loop, &mut state);
-        assert!(state.delay_inhibitors.is_empty());
-    }
-
-    #[test]
     fn resume_releases_each_cycles_inhibitor_while_the_hook_keeps_running() {
         let mut event_loop = new_event_loop();
         let mut state = runtime_state();
         state.before_sleep_command = Some("exec sleep 5".to_string());
+        let mut process_id = None;
 
         for cycle in 0..2 {
             let (mut observer, inhibitor) = observable_inhibitor();
@@ -1676,7 +1527,6 @@ mod tests {
             assert_runtime_ok(state.dispatch_command_intents(&event_loop.handle()));
             assert!(matches!(observer.read(&mut [0]), Err(error)
                 if error.kind() == io::ErrorKind::WouldBlock));
-            assert_eq!(state.delay_inhibitors.len(), 1);
             let events = state.take_runtime_events();
             if cycle == 0 {
                 assert!(matches!(
@@ -1686,6 +1536,9 @@ mod tests {
                         RuntimeEvent::CommandStarted(_)
                     ]
                 ));
+                if let RuntimeEvent::CommandStarted(start) = &events[1] {
+                    process_id = Some(start.process_id);
+                }
             } else {
                 assert!(matches!(
                     events.as_slice(),
@@ -1698,32 +1551,24 @@ mod tests {
 
             state.record_session_event(SessionEvent::Resumed);
             assert_runtime_ok(state.route_session_events());
-            assert!(state.delay_inhibitors.is_empty());
             assert_inhibitor_released(&mut observer);
             assert!(!state.preparing_for_sleep);
             assert!(matches!(
                 state.take_runtime_events().as_slice(),
                 [RuntimeEvent::ResumedFromSleep]
             ));
-            let completions = state
-                .processes
-                .collect_finished()
-                .unwrap_or_else(|error| panic!("{error}"));
-            assert!(completions.is_empty());
-            assert_eq!(state.processes.running_count(), 1);
-            assert!(!state.dispatcher.is_empty());
+            assert_eq!(state.commands.running_count(), 1);
+            assert!(!state.commands.is_empty());
         }
 
-        let process = state.processes.running_processes().remove(0);
-        let pid = i32::try_from(process.process_id)
+        let pid = i32::try_from(process_id.unwrap_or_else(|| panic!("command did not start")))
             .ok()
             .and_then(rustix::process::Pid::from_raw)
             .unwrap_or_else(|| panic!("invalid test process ID"));
         rustix::process::kill_process(pid, rustix::process::Signal::TERM)
             .unwrap_or_else(|error| panic!("failed to stop test command: {error}"));
         let _ = wait_for_process_events(&mut event_loop, &mut state);
-        assert!(state.dispatcher.is_empty());
-        assert!(state.processes.is_empty());
+        assert!(state.commands.is_empty());
     }
 
     #[test]
@@ -1753,7 +1598,6 @@ mod tests {
         assert_runtime_ok(state.dispatch_command_intents(&event_loop.handle()));
         assert!(matches!(next_observer.read(&mut [0]), Err(error)
             if error.kind() == io::ErrorKind::WouldBlock));
-        assert_eq!(state.delay_inhibitors.len(), 1);
         assert!(matches!(
             state.take_runtime_events().as_slice(),
             [
@@ -1765,104 +1609,7 @@ mod tests {
             ]
         ));
         let _ = wait_for_process_events(&mut event_loop, &mut state);
-        assert!(state.delay_inhibitors.is_empty());
-        assert!(state.processes.is_empty());
-    }
-
-    #[test]
-    fn failed_sleep_hook_releases_its_slot_and_inhibitor_without_command_text() {
-        let event_loop = new_event_loop();
-        let mut state = runtime_state();
-        let (mut observer, inhibitor) = observable_inhibitor();
-        state.before_sleep_command = Some("printf secret-command-token\0".to_string());
-        state.record_session_event(SessionEvent::PrepareForSleep(Some(inhibitor)));
-
-        assert_runtime_ok(state.route_session_events());
-        assert_runtime_ok(state.dispatch_command_intents(&event_loop.handle()));
-
-        let events = state.take_runtime_events();
-        assert!(matches!(
-            events.as_slice(),
-            [RuntimeEvent::PreparingForSleep, RuntimeEvent::CommandFailed { command, error }]
-                if command.context == CommandContext::BeforeSleep
-                    && matches!(error, crate::command::ProcessError::Spawn { command_id, .. }
-                        if *command_id == command.command_id)
-        ));
-        assert!(!format!("{events:?}").contains("secret-command-token"));
-        assert_inhibitor_released(&mut observer);
-        assert!(state.delay_inhibitors.is_empty());
-        assert!(state.dispatcher.is_empty());
-        assert!(state.processes.is_empty());
-    }
-
-    #[test]
-    fn launches_and_reaps_commands_through_pidfds() {
-        let mut event_loop = new_event_loop();
-        let mut state = runtime_state();
-        state.command_intents = vec![intent(0, CommandKind::Timeout, "exit 0")];
-
-        assert_runtime_ok(state.dispatch_command_intents(&event_loop.handle()));
-        assert!(matches!(
-            state.take_runtime_events().as_slice(),
-            [RuntimeEvent::CommandStarted(_)]
-        ));
-
-        let events = wait_for_process_events(&mut event_loop, &mut state);
-        assert!(matches!(
-            events.as_slice(),
-            [RuntimeEvent::CommandFinished { completion, .. }] if completion.status.success()
-        ));
-        assert!(state.dispatcher.is_empty());
-        assert!(state.processes.is_empty());
-    }
-
-    #[test]
-    fn skips_duplicate_commands_while_the_first_process_runs() {
-        let mut event_loop = new_event_loop();
-        let mut state = runtime_state();
-        state.command_intents = vec![
-            intent(0, CommandKind::Timeout, "sleep 0.05"),
-            intent(0, CommandKind::Timeout, "sleep 0.05"),
-        ];
-
-        assert_runtime_ok(state.dispatch_command_intents(&event_loop.handle()));
-        let events = state.take_runtime_events();
-        assert!(matches!(
-            events.as_slice(),
-            [
-                RuntimeEvent::CommandStarted(_),
-                RuntimeEvent::CommandSkipped(_)
-            ]
-        ));
-
-        let _ = wait_for_process_events(&mut event_loop, &mut state);
-        assert!(state.dispatcher.is_empty());
-        assert!(state.processes.is_empty());
-    }
-
-    fn new_event_loop() -> EventLoop<'static, RuntimeState> {
-        match EventLoop::try_new() {
-            Ok(event_loop) => event_loop,
-            Err(error) => panic!("{error}"),
-        }
-    }
-
-    fn wait_for_process_events(
-        event_loop: &mut EventLoop<'static, RuntimeState>,
-        state: &mut RuntimeState,
-    ) -> Vec<RuntimeEvent> {
-        for _ in 0..20 {
-            if let Err(error) = event_loop.dispatch(Some(Duration::from_millis(100)), state) {
-                panic!("{error}");
-            }
-            assert_runtime_ok(state.collect_ready_processes());
-            let events = state.take_runtime_events();
-            if !events.is_empty() {
-                return events;
-            }
-        }
-
-        panic!("command did not finish");
+        assert!(state.commands.is_empty());
     }
 
     fn runtime_state() -> RuntimeState {
@@ -1967,41 +1714,5 @@ mod tests {
             assert!(Instant::now() < deadline, "reload worker did not respond");
             thread::sleep(Duration::from_millis(1));
         }
-    }
-
-    fn assert_inhibitor_released(observer: &mut UnixStream) {
-        // concurrent forks can briefly hold a CLOEXEC FD until the child execs
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            match observer.read(&mut [0]) {
-                Ok(0) => return,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                result => panic!("unexpected inhibitor observation: {result:?}"),
-            }
-            assert!(
-                Instant::now() < deadline,
-                "sleep inhibitor FD is still open"
-            );
-            thread::sleep(Duration::from_millis(1));
-        }
-    }
-
-    fn observable_inhibitor() -> (UnixStream, DelayInhibitor) {
-        let (observer, held) = UnixStream::pair()
-            .unwrap_or_else(|error| panic!("failed to create test socket pair: {error}"));
-        observer
-            .set_nonblocking(true)
-            .unwrap_or_else(|error| panic!("failed to set test socket nonblocking: {error}"));
-        let fd: OwnedFd = held.into();
-        (observer, DelayInhibitor::new(fd.into()))
-    }
-
-    fn test_inhibitor() -> DelayInhibitor {
-        let file = match File::open("/dev/null") {
-            Ok(file) => file,
-            Err(error) => panic!("failed to open test file: {error}"),
-        };
-        let fd: OwnedFd = file.into();
-        DelayInhibitor::new(fd.into())
     }
 }
