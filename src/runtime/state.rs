@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     command::CommandContext,
-    config::Config,
+    config::{Config, GeneralConfig},
     control::{ControlEvent, DbusInhibitorStatus, StatusSnapshot},
     listener::{CommandIntent, InhibitPolicy, ListenerSet},
     session::{DbusInhibitEvent, DelayInhibitor, SessionEvent},
@@ -22,10 +22,7 @@ pub(super) struct RuntimeState {
     listeners: ListenerSet,
     command_intents: Vec<CommandIntent>,
     session_command_intents: Vec<SessionCommandIntent>,
-    lock_command: Option<String>,
-    unlock_command: Option<String>,
-    before_sleep_command: Option<String>,
-    after_resume_command: Option<String>,
+    session_commands: SessionCommands,
     session_events: Vec<SessionEvent>,
     session_channel_closed: bool,
     dbus_inhibit_events: Vec<DbusInhibitEvent>,
@@ -60,10 +57,7 @@ impl RuntimeState {
             listeners,
             command_intents: Vec::new(),
             session_command_intents: Vec::new(),
-            lock_command: config.general.lock_command.clone(),
-            unlock_command: config.general.unlock_command.clone(),
-            before_sleep_command: config.general.before_sleep_command.clone(),
-            after_resume_command: config.general.after_resume_command.clone(),
+            session_commands: SessionCommands::from(&config.general),
             session_events: Vec::new(),
             session_channel_closed: false,
             dbus_inhibit_events: Vec::new(),
@@ -113,10 +107,7 @@ impl RuntimeState {
         self.commands
             .remap_listener_slots(&self.listeners.matching_listener_ids(&listeners));
         self.listeners = listeners;
-        self.lock_command = config.general.lock_command.clone();
-        self.unlock_command = config.general.unlock_command.clone();
-        self.before_sleep_command = config.general.before_sleep_command.clone();
-        self.after_resume_command = config.general.after_resume_command.clone();
+        self.session_commands = SessionCommands::from(&config.general);
         self.set_idle_hint(false);
 
         Ok(())
@@ -358,13 +349,11 @@ impl RuntimeState {
                     }
                     self.preparing_for_sleep = true;
                     self.runtime_events.push(RuntimeEvent::PreparingForSleep);
-                    if let Some(command) = self.before_sleep_command.clone() {
-                        self.session_command_intents.push(SessionCommandIntent {
-                            context: CommandContext::BeforeSleep,
-                            command,
-                            inhibitor,
-                        });
-                    }
+                    self.queue_session_command(
+                        self.session_commands.before_sleep.clone(),
+                        CommandContext::BeforeSleep,
+                        inhibitor,
+                    );
                 }
                 SessionEvent::Resumed => {
                     self.preparing_for_sleep = false;
@@ -375,34 +364,28 @@ impl RuntimeState {
                     }
                     self.set_idle_hint(false);
                     self.runtime_events.push(RuntimeEvent::ResumedFromSleep);
-                    if let Some(command) = self.after_resume_command.clone() {
-                        self.session_command_intents.push(SessionCommandIntent {
-                            context: CommandContext::AfterResume,
-                            command,
-                            inhibitor: None,
-                        });
-                    }
+                    self.queue_session_command(
+                        self.session_commands.after_resume.clone(),
+                        CommandContext::AfterResume,
+                        None,
+                    );
                 }
                 SessionEvent::LockRequested => {
                     self.runtime_events.push(RuntimeEvent::LockRequested);
-                    if let Some(command) = self.lock_command.clone() {
-                        self.session_command_intents.push(SessionCommandIntent {
-                            context: CommandContext::Lock,
-                            command,
-                            inhibitor: None,
-                        });
-                    }
+                    self.queue_session_command(
+                        self.session_commands.lock.clone(),
+                        CommandContext::Lock,
+                        None,
+                    );
                 }
                 SessionEvent::UnlockRequested => {
                     self.set_idle_hint(false);
                     self.runtime_events.push(RuntimeEvent::UnlockRequested);
-                    if let Some(command) = self.unlock_command.clone() {
-                        self.session_command_intents.push(SessionCommandIntent {
-                            context: CommandContext::Unlock,
-                            command,
-                            inhibitor: None,
-                        });
-                    }
+                    self.queue_session_command(
+                        self.session_commands.unlock.clone(),
+                        CommandContext::Unlock,
+                        None,
+                    );
                 }
                 SessionEvent::SystemdIdleInhibitorsChanged(inhibitors) => {
                     let active_count = inhibitors.len();
@@ -448,6 +431,21 @@ impl RuntimeState {
 
     pub(super) fn shutdown_requested(&self) -> bool {
         self.shutdown.is_some()
+    }
+
+    fn queue_session_command(
+        &mut self,
+        command: Option<String>,
+        context: CommandContext,
+        inhibitor: Option<DelayInhibitor>,
+    ) {
+        if let Some(command) = command {
+            self.session_command_intents.push(SessionCommandIntent {
+                context,
+                command,
+                inhibitor,
+            });
+        }
     }
 
     fn route_idle_event(&mut self, event: IdleEvent) -> Result<(), RuntimeError> {
@@ -574,6 +572,24 @@ impl RuntimeState {
         self.idle_hint_updates.push(idle);
         self.runtime_events
             .push(RuntimeEvent::IdleHintChanged { idle });
+    }
+}
+
+struct SessionCommands {
+    lock: Option<String>,
+    unlock: Option<String>,
+    before_sleep: Option<String>,
+    after_resume: Option<String>,
+}
+
+impl From<&GeneralConfig> for SessionCommands {
+    fn from(config: &GeneralConfig) -> Self {
+        Self {
+            lock: config.lock_command.clone(),
+            unlock: config.unlock_command.clone(),
+            before_sleep: config.before_sleep_command.clone(),
+            after_resume: config.after_resume_command.clone(),
+        }
     }
 }
 
@@ -1523,9 +1539,152 @@ mod tests {
     }
 
     #[test]
+    fn construction_loads_all_session_hooks_in_event_order() {
+        let mut state = runtime_state_from_config(&session_hook_config("initial"));
+
+        queue_all_session_hooks(&mut state);
+
+        assert_eq!(
+            queued_session_commands(&state),
+            vec![
+                (CommandContext::Lock, "lock initial"),
+                (CommandContext::BeforeSleep, "before sleep initial"),
+                (CommandContext::Unlock, "unlock initial"),
+                (CommandContext::AfterResume, "after resume initial"),
+            ]
+        );
+        assert!(matches!(
+            state.take_runtime_events().as_slice(),
+            [
+                RuntimeEvent::LockRequested,
+                RuntimeEvent::PreparingForSleep,
+                RuntimeEvent::UnlockRequested,
+                RuntimeEvent::ResumedFromSleep,
+            ]
+        ));
+    }
+
+    #[test]
+    fn accepted_reload_replaces_all_session_hooks() {
+        let mut state = runtime_state_from_config(&session_hook_config("old"));
+
+        assert_runtime_ok(state.apply_config(&session_hook_config("new")));
+        queue_all_session_hooks(&mut state);
+
+        assert_eq!(
+            queued_session_commands(&state),
+            vec![
+                (CommandContext::Lock, "lock new"),
+                (CommandContext::BeforeSleep, "before sleep new"),
+                (CommandContext::Unlock, "unlock new"),
+                (CommandContext::AfterResume, "after resume new"),
+            ]
+        );
+    }
+
+    #[test]
+    fn accepted_reload_removes_all_session_hooks() {
+        let mut state = runtime_state_from_config(&session_hook_config("old"));
+
+        assert_runtime_ok(state.apply_config(&runtime_config()));
+        queue_all_session_hooks(&mut state);
+
+        assert!(state.session_command_intents.is_empty());
+        assert!(matches!(
+            state.take_runtime_events().as_slice(),
+            [
+                RuntimeEvent::LockRequested,
+                RuntimeEvent::PreparingForSleep,
+                RuntimeEvent::UnlockRequested,
+                RuntimeEvent::ResumedFromSleep,
+            ]
+        ));
+    }
+
+    #[test]
+    fn failed_reconfiguration_retains_all_session_hooks() {
+        let mut state = runtime_state_from_config(&session_hook_config("old"));
+        let mut rejected = session_hook_config("rejected");
+        rejected.listeners[0].timeout_seconds = u64::MAX;
+
+        assert!(state.apply_config(&rejected).is_err());
+        queue_all_session_hooks(&mut state);
+
+        assert_eq!(
+            queued_session_commands(&state),
+            vec![
+                (CommandContext::Lock, "lock old"),
+                (CommandContext::BeforeSleep, "before sleep old"),
+                (CommandContext::Unlock, "unlock old"),
+                (CommandContext::AfterResume, "after resume old"),
+            ]
+        );
+    }
+
+    #[test]
+    fn queued_session_commands_retain_their_text_across_reload() {
+        let mut state = runtime_state_from_config(&session_hook_config("old"));
+        queue_all_session_hooks(&mut state);
+
+        assert_runtime_ok(state.apply_config(&session_hook_config("new")));
+        queue_all_session_hooks(&mut state);
+        assert_runtime_ok(state.apply_config(&runtime_config()));
+        queue_all_session_hooks(&mut state);
+
+        assert_eq!(
+            queued_session_commands(&state),
+            vec![
+                (CommandContext::Lock, "lock old"),
+                (CommandContext::BeforeSleep, "before sleep old"),
+                (CommandContext::Unlock, "unlock old"),
+                (CommandContext::AfterResume, "after resume old"),
+                (CommandContext::Lock, "lock new"),
+                (CommandContext::BeforeSleep, "before sleep new"),
+                (CommandContext::Unlock, "unlock new"),
+                (CommandContext::AfterResume, "after resume new"),
+            ]
+        );
+    }
+
+    #[test]
+    fn paused_runtime_preserves_session_hook_order() {
+        let mut state = runtime_state_from_config(&session_hook_config("paused"));
+        assert!(state.pause_idle());
+
+        queue_all_session_hooks(&mut state);
+
+        assert_eq!(
+            queued_session_commands(&state),
+            vec![
+                (CommandContext::Lock, "lock paused"),
+                (CommandContext::BeforeSleep, "before sleep paused"),
+                (CommandContext::Unlock, "unlock paused"),
+                (CommandContext::AfterResume, "after resume paused"),
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_before_sleep_hook_releases_inhibitor_during_routing() {
+        let mut state = runtime_state();
+        let (mut observer, inhibitor) = observable_inhibitor();
+        state.record_session_event(SessionEvent::PrepareForSleep(Some(inhibitor)));
+
+        assert_runtime_ok(state.route_session_events());
+
+        assert_inhibitor_released(&mut observer);
+        assert!(state.session_command_intents.is_empty());
+        assert!(state.preparing_for_sleep);
+        assert!(matches!(
+            state.take_runtime_events().as_slice(),
+            [RuntimeEvent::PreparingForSleep]
+        ));
+    }
+
+    #[test]
     fn routes_prepare_for_sleep_to_the_configured_command() {
         let mut state = runtime_state();
-        state.before_sleep_command = Some("lock before sleep".to_string());
+        state.session_commands.before_sleep = Some("lock before sleep".to_string());
         state.record_session_event(SessionEvent::PrepareForSleep(None));
 
         assert_runtime_ok(state.route_session_events());
@@ -1547,7 +1706,7 @@ mod tests {
     #[test]
     fn ignores_duplicate_prepare_for_sleep_events() {
         let mut state = runtime_state();
-        state.before_sleep_command = Some("lock before sleep".to_string());
+        state.session_commands.before_sleep = Some("lock before sleep".to_string());
         state.record_session_event(SessionEvent::PrepareForSleep(None));
         state.record_session_event(SessionEvent::PrepareForSleep(None));
 
@@ -1563,7 +1722,7 @@ mod tests {
     #[test]
     fn routes_resume_to_the_configured_command() {
         let mut state = runtime_state();
-        state.after_resume_command = Some("outputs on".to_string());
+        state.session_commands.after_resume = Some("outputs on".to_string());
         state.record_session_event(SessionEvent::Resumed);
 
         assert_runtime_ok(state.route_session_events());
@@ -1585,7 +1744,7 @@ mod tests {
     #[test]
     fn routes_lock_request_to_the_configured_command() {
         let mut state = runtime_state();
-        state.lock_command = Some("lock session".to_string());
+        state.session_commands.lock = Some("lock session".to_string());
         state.record_session_event(SessionEvent::LockRequested);
 
         assert_runtime_ok(state.route_session_events());
@@ -1607,7 +1766,7 @@ mod tests {
     #[test]
     fn routes_unlock_request_to_the_configured_command() {
         let mut state = runtime_state();
-        state.unlock_command = Some("unlock session".to_string());
+        state.session_commands.unlock = Some("unlock session".to_string());
         state.record_session_event(SessionEvent::UnlockRequested);
 
         assert_runtime_ok(state.route_session_events());
@@ -1644,7 +1803,7 @@ mod tests {
     fn resume_releases_each_cycles_inhibitor_while_the_hook_keeps_running() {
         let mut event_loop = new_event_loop();
         let mut state = runtime_state();
-        state.before_sleep_command = Some("exec sleep 5".to_string());
+        state.session_commands.before_sleep = Some("exec sleep 5".to_string());
         let mut process_id = None;
 
         for cycle in 0..2 {
@@ -1702,7 +1861,7 @@ mod tests {
     fn resume_releases_queued_inhibitors_before_command_dispatch() {
         let mut event_loop = new_event_loop();
         let mut state = runtime_state();
-        state.before_sleep_command = Some("exit 0".to_string());
+        state.session_commands.before_sleep = Some("exit 0".to_string());
         let (mut observer, inhibitor) = observable_inhibitor();
         state.record_session_event(SessionEvent::PrepareForSleep(Some(inhibitor)));
         state.record_session_event(SessionEvent::Resumed);
@@ -1740,13 +1899,49 @@ mod tests {
     }
 
     fn runtime_state() -> RuntimeState {
-        let config = runtime_config();
+        runtime_state_from_config(&runtime_config())
+    }
+
+    fn runtime_state_from_config(config: &Config) -> RuntimeState {
         RuntimeState::new(
             IdleWaylandState::default(),
-            ListenerSet::from_config(&config),
-            &config,
+            ListenerSet::from_config(config),
+            config,
             None,
         )
+    }
+
+    fn session_hook_config(version: &str) -> Config {
+        Config {
+            general: GeneralConfig {
+                lock_command: Some(format!("lock {version}")),
+                unlock_command: Some(format!("unlock {version}")),
+                before_sleep_command: Some(format!("before sleep {version}")),
+                after_resume_command: Some(format!("after resume {version}")),
+                ..GeneralConfig::default()
+            },
+            ..runtime_config()
+        }
+    }
+
+    fn queue_all_session_hooks(state: &mut RuntimeState) {
+        for event in [
+            SessionEvent::LockRequested,
+            SessionEvent::PrepareForSleep(None),
+            SessionEvent::UnlockRequested,
+            SessionEvent::Resumed,
+        ] {
+            state.record_session_event(event);
+        }
+        assert_runtime_ok(state.route_session_events());
+    }
+
+    fn queued_session_commands(state: &RuntimeState) -> Vec<(CommandContext, &str)> {
+        state
+            .session_command_intents
+            .iter()
+            .map(|intent| (intent.context, intent.command.as_str()))
+            .collect()
     }
 
     fn runtime_config() -> Config {
