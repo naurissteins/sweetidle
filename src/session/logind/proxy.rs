@@ -47,10 +47,10 @@ pub(super) async fn create_session_proxy(
     let path = resolve_session_path(manager).await?;
     LogindSessionProxy::builder(connection)
         .path(path)
-        .map_err(SessionError::CreateSessionProxy)?
+        .map_err(|source| SessionError::CreateSessionProxy(Box::new(source)))?
         .build()
         .await
-        .map_err(SessionError::CreateSessionProxy)
+        .map_err(|source| SessionError::CreateSessionProxy(Box::new(source)))
 }
 
 pub(super) async fn resolve_session_path(
@@ -88,7 +88,7 @@ pub(super) async fn acquire_delay_inhibitor(
         )
         .await
         .map(DelayInhibitor::new)
-        .map_err(SessionError::Inhibit)
+        .map_err(|source| SessionError::Inhibit(Box::new(source)))
 }
 
 pub(super) async fn set_idle_hint(
@@ -102,7 +102,7 @@ pub(super) async fn set_idle_hint(
     proxy
         .set_idle_hint(idle)
         .await
-        .map_err(SessionError::SetIdleHint)
+        .map_err(|source| SessionError::SetIdleHint(Box::new(source)))
 }
 
 pub(super) async fn query_idle_inhibitors(
@@ -112,5 +112,5 @@ pub(super) async fn query_idle_inhibitors(
         .list_inhibitors()
         .await
         .map(idle_block_inhibitors)
-        .map_err(SessionError::QueryInhibitors)
+        .map_err(|source| SessionError::QueryInhibitors(Box::new(source)))
 }

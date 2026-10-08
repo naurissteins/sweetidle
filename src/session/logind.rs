@@ -1,15 +1,13 @@
-use std::{
-    error::Error,
-    fmt, io,
-    sync::mpsc::{self, SyncSender},
-    thread::{self, JoinHandle},
-};
+use std::{error::Error, fmt, io, sync::mpsc::SyncSender};
 
-use async_channel::{Receiver, Sender, bounded, unbounded};
+use async_channel::{Receiver, Sender, unbounded};
 use calloop::channel::{Channel, Sender as EventSender, channel};
 use zbus::zvariant::OwnedFd;
 
-use super::SystemdIdleInhibitor;
+use super::{
+    SystemdIdleInhibitor,
+    worker::{Worker, WorkerError, report_initialization_error},
+};
 
 mod proxy;
 mod signals;
@@ -47,29 +45,28 @@ pub(crate) struct LogindFeatures {
 
 pub(crate) struct LogindMonitor {
     requests: Option<Sender<SessionRequest>>,
-    shutdown: Option<Sender<()>>,
-    thread: Option<JoinHandle<()>>,
+    worker: Worker,
 }
 
 #[derive(Debug)]
 pub enum SessionError {
     SpawnWorker(io::Error),
     WorkerInitializationStopped,
-    Connect(zbus::Error),
-    CreateProxy(zbus::Error),
+    Connect(Box<zbus::Error>),
+    CreateProxy(Box<zbus::Error>),
     ResolveSession {
         by_session_id: Option<Box<zbus::Error>>,
         by_process_id: Box<zbus::Error>,
     },
-    CreateSessionProxy(zbus::Error),
-    Subscribe(zbus::Error),
-    SubscribeSession(zbus::Error),
-    QueryState(zbus::Error),
-    QueryInhibitors(zbus::Error),
-    Inhibit(zbus::Error),
-    SetIdleHint(zbus::Error),
+    CreateSessionProxy(Box<zbus::Error>),
+    Subscribe(Box<zbus::Error>),
+    SubscribeSession(Box<zbus::Error>),
+    QueryState(Box<zbus::Error>),
+    QueryInhibitors(Box<zbus::Error>),
+    Inhibit(Box<zbus::Error>),
+    SetIdleHint(Box<zbus::Error>),
     RequestChannelClosed,
-    DecodeSignal(zbus::Error),
+    DecodeSignal(Box<zbus::Error>),
     Disconnected,
 }
 
@@ -78,38 +75,15 @@ impl LogindMonitor {
         features: LogindFeatures,
     ) -> Result<(Self, Channel<SessionEvent>), SessionError> {
         let (event_sender, event_channel) = channel();
-        let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
-        let (shutdown_sender, shutdown_receiver) = bounded(1);
         let (request_sender, request_receiver) = unbounded();
-        let thread = thread::Builder::new()
-            .name("sweetsidle-logind".to_string())
-            .spawn(move || {
-                run_worker(
-                    features,
-                    event_sender,
-                    ready_sender,
-                    request_receiver,
-                    shutdown_receiver,
-                );
-            })
-            .map_err(SessionError::SpawnWorker)?;
-        match ready_receiver.recv() {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                let _ = thread.join();
-                return Err(error);
-            }
-            Err(_) => {
-                let _ = thread.join();
-                return Err(SessionError::WorkerInitializationStopped);
-            }
-        };
+        let worker = Worker::spawn("sweetsidle-logind", move |ready, shutdown| {
+            run_worker(features, event_sender, ready, request_receiver, shutdown);
+        })?;
 
         Ok((
             Self {
                 requests: Some(request_sender),
-                shutdown: Some(shutdown_sender),
-                thread: Some(thread),
+                worker,
             },
             event_channel,
         ))
@@ -126,12 +100,17 @@ impl LogindMonitor {
 
 impl Drop for LogindMonitor {
     fn drop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.try_send(());
-        }
+        // close requests between the shutdown notification and the worker's join
+        self.worker.request_shutdown();
         self.requests.take();
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+    }
+}
+
+impl From<WorkerError> for SessionError {
+    fn from(error: WorkerError) -> Self {
+        match error {
+            WorkerError::Spawn(source) => Self::SpawnWorker(source),
+            WorkerError::InitializationStopped => Self::WorkerInitializationStopped,
         }
     }
 }
@@ -220,7 +199,7 @@ impl Error for SessionError {
             | Self::QueryInhibitors(source)
             | Self::Inhibit(source)
             | Self::SetIdleHint(source)
-            | Self::DecodeSignal(source) => Some(source),
+            | Self::DecodeSignal(source) => Some(source.as_ref()),
             Self::ResolveSession { by_process_id, .. } => Some(by_process_id.as_ref()),
             Self::WorkerInitializationStopped | Self::RequestChannelClosed | Self::Disconnected => {
                 None
@@ -265,14 +244,6 @@ async fn worker_loop(
     }
 }
 
-fn report_initialization_error<T>(
-    ready: &SyncSender<Result<(), SessionError>>,
-    error: SessionError,
-) -> Result<T, SessionError> {
-    let _ = ready.send(Err(error));
-    Err(SessionError::WorkerInitializationStopped)
-}
-
 #[derive(Debug, Clone, Copy)]
 enum SessionRequest {
     SetIdleHint(bool),
@@ -286,7 +257,42 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::{LogindFeatures, LogindMonitor, SessionEvent, proxy::LogindManagerProxy};
+    use super::{
+        LogindFeatures, LogindMonitor, SessionError, SessionEvent, Worker,
+        proxy::LogindManagerProxy,
+    };
+
+    #[test]
+    fn monitor_drop_closes_requests_before_joining_the_worker() {
+        let (requests, receiver) = async_channel::unbounded::<super::SessionRequest>();
+        let (finished, completed) = std::sync::mpsc::channel();
+        let worker =
+            Worker::spawn::<SessionError>("sweetsidle-test-logind", move |ready, shutdown| {
+                ready.send(Ok(())).unwrap_or_else(|error| panic!("{error}"));
+                async_io::block_on(futures_lite::future::race(
+                    async {
+                        shutdown
+                            .recv()
+                            .await
+                            .unwrap_or_else(|error| panic!("{error}"));
+                        assert!(receiver.recv().await.is_err());
+                        finished.send(()).unwrap_or_else(|error| panic!("{error}"));
+                    },
+                    async {
+                        async_io::Timer::after(Duration::from_secs(5)).await;
+                        panic!("monitor did not close its channels before joining");
+                    },
+                ));
+            })
+            .unwrap_or_else(|error| panic!("worker startup failed: {error}"));
+
+        drop(LogindMonitor {
+            requests: Some(requests),
+            worker,
+        });
+
+        assert!(completed.try_recv().is_ok());
+    }
 
     #[test]
     #[ignore = "requires access to systemd-logind"]

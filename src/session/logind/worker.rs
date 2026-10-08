@@ -33,7 +33,9 @@ pub(super) struct LogindWorker {
 impl LogindWorker {
     pub(super) async fn open(features: LogindFeatures) -> Result<Self, SessionError> {
         // dbus work stays off the Wayland event loop
-        let connection = Connection::system().await.map_err(SessionError::Connect)?;
+        let connection = Connection::system()
+            .await
+            .map_err(|source| SessionError::Connect(Box::new(source)))?;
         Self::from_connection(connection, features).await
     }
 
@@ -43,13 +45,13 @@ impl LogindWorker {
     ) -> Result<Self, SessionError> {
         let proxy = LogindManagerProxy::new(&connection)
             .await
-            .map_err(SessionError::CreateProxy)?;
+            .map_err(|source| SessionError::CreateProxy(Box::new(source)))?;
         let sleep_signals = if features.sleep_events {
             Some(
                 proxy
                     .receive_prepare_for_sleep()
                     .await
-                    .map_err(SessionError::Subscribe)?,
+                    .map_err(|source| SessionError::Subscribe(Box::new(source)))?,
             )
         } else {
             None
@@ -95,7 +97,7 @@ impl LogindWorker {
                 .proxy
                 .preparing_for_sleep()
                 .await
-                .map_err(SessionError::QueryState)?;
+                .map_err(|source| SessionError::QueryState(Box::new(source)))?;
         }
         if self.features.idle_hint {
             set_idle_hint(self.session_proxy.as_ref(), false).await?;
@@ -141,7 +143,7 @@ impl LogindWorker {
                                 signal
                                     .args()
                                     .map(|args| Some(*args.active()))
-                                    .map_err(SessionError::DecodeSignal),
+                                    .map_err(|source| SessionError::DecodeSignal(Box::new(source))),
                             ),
                             None => WorkerInput::Sleep(Ok(None)),
                         },
