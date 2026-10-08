@@ -3,6 +3,7 @@ mod inhibit;
 mod logind;
 mod screensaver;
 mod systemd_inhibit;
+mod worker;
 
 pub use logind::SessionError;
 pub use screensaver::DbusInhibitError;

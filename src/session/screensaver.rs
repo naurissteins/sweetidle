@@ -2,10 +2,9 @@ use std::{
     error::Error,
     fmt, io,
     sync::{Arc, Mutex, mpsc},
-    thread::{self, JoinHandle},
 };
 
-use async_channel::{Receiver, Sender as ShutdownSender, bounded};
+use async_channel::Receiver;
 use calloop::channel::{Channel, Sender as EventSender, channel};
 use futures_lite::{StreamExt, future};
 use zbus::{
@@ -14,7 +13,10 @@ use zbus::{
     message::Header,
 };
 
-use super::inhibit::{InhibitorInfo, InhibitorRegistry, InhibitorRegistryError};
+use super::{
+    inhibit::{InhibitorInfo, InhibitorRegistry, InhibitorRegistryError},
+    worker::{Worker, WorkerError, report_initialization_error},
+};
 
 const SERVICE_NAME: &str = "org.freedesktop.ScreenSaver";
 const OBJECT_PATH: &str = "/org/freedesktop/ScreenSaver";
@@ -39,8 +41,7 @@ pub(crate) enum DbusInhibitEvent {
 }
 
 pub(crate) struct DbusInhibitMonitor {
-    shutdown: Option<ShutdownSender<()>>,
-    thread: Option<JoinHandle<()>>,
+    _worker: Worker,
 }
 
 #[derive(Debug)]
@@ -60,42 +61,19 @@ pub enum DbusInhibitError {
 impl DbusInhibitMonitor {
     pub(crate) fn connect() -> Result<(Self, Channel<DbusInhibitEvent>), DbusInhibitError> {
         let (event_sender, event_channel) = channel();
-        let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
-        let (shutdown_sender, shutdown_receiver) = bounded(1);
-        let thread = thread::Builder::new()
-            .name("sweetsidle-dbus-inhibit".to_string())
-            .spawn(move || run_worker(event_sender, ready_sender, shutdown_receiver))
-            .map_err(DbusInhibitError::SpawnWorker)?;
+        let worker = Worker::spawn("sweetsidle-dbus-inhibit", move |ready, shutdown| {
+            run_worker(event_sender, ready, shutdown)
+        })?;
 
-        match ready_receiver.recv() {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                let _ = thread.join();
-                return Err(error);
-            }
-            Err(_) => {
-                let _ = thread.join();
-                return Err(DbusInhibitError::WorkerInitializationStopped);
-            }
-        }
-
-        Ok((
-            Self {
-                shutdown: Some(shutdown_sender),
-                thread: Some(thread),
-            },
-            event_channel,
-        ))
+        Ok((Self { _worker: worker }, event_channel))
     }
 }
 
-impl Drop for DbusInhibitMonitor {
-    fn drop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.try_send(());
-        }
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+impl From<WorkerError> for DbusInhibitError {
+    fn from(error: WorkerError) -> Self {
+        match error {
+            WorkerError::Spawn(source) => Self::SpawnWorker(source),
+            WorkerError::InitializationStopped => Self::WorkerInitializationStopped,
         }
     }
 }
@@ -390,14 +368,6 @@ fn state_unavailable<T>(_: std::sync::PoisonError<T>) -> fdo::Error {
     fdo::Error::Failed("idle inhibitor state is unavailable".to_string())
 }
 
-fn report_initialization_error<T>(
-    ready: &mpsc::SyncSender<Result<(), DbusInhibitError>>,
-    error: DbusInhibitError,
-) -> Result<T, DbusInhibitError> {
-    let _ = ready.send(Err(error));
-    Err(DbusInhibitError::WorkerInitializationStopped)
-}
-
 enum WorkerInput<T> {
     OwnerChanged(Option<T>),
     Shutdown,
@@ -424,6 +394,56 @@ mod tests {
 
         #[zbus(name = "UnInhibit")]
         fn un_inhibit(&self, cookie: u32) -> zbus::Result<()>;
+    }
+
+    #[test]
+    #[ignore = "requires a private D-Bus session"]
+    fn readiness_and_shutdown_preserve_exclusive_name_ownership() {
+        let (monitor, events) = connect_monitor();
+        assert!(matches!(
+            DbusInhibitMonitor::connect(),
+            Err(super::DbusInhibitError::OwnName(_))
+        ));
+
+        drop(monitor);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match events.try_recv() {
+                Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "worker retained the event sender"
+                    );
+                    thread::sleep(Duration::from_millis(1));
+                }
+                event => panic!("unexpected shutdown event: {event:?}"),
+            }
+        }
+        async_io::block_on(async {
+            let observer = connect_client().await;
+            let bus = zbus::fdo::DBusProxy::new(&observer)
+                .await
+                .unwrap_or_else(|error| panic!("failed to create bus proxy: {error}"));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while bus
+                .name_has_owner(
+                    super::SERVICE_NAME
+                        .try_into()
+                        .unwrap_or_else(|error| panic!("invalid service name: {error}")),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("name ownership query failed: {error}"))
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "worker retained the bus name after shutdown"
+                );
+                async_io::Timer::after(Duration::from_millis(1)).await;
+            }
+        });
+        let (restarted, _events) = connect_monitor();
+        drop(restarted);
     }
 
     #[test]

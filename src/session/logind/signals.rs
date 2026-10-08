@@ -10,7 +10,7 @@ pub(super) async fn subscribe(
         .inner()
         .receive_all_signals()
         .await
-        .map_err(SessionError::SubscribeSession)
+        .map_err(|source| SessionError::SubscribeSession(Box::new(source)))
 }
 
 pub(super) fn decode(message: &Message) -> Result<Option<SessionEvent>, SessionError> {
@@ -23,7 +23,7 @@ pub(super) fn decode(message: &Message) -> Result<Option<SessionEvent>, SessionE
     message
         .body()
         .deserialize::<()>()
-        .map_err(SessionError::DecodeSignal)?;
+        .map_err(|source| SessionError::DecodeSignal(Box::new(source)))?;
     Ok(Some(event))
 }
 
