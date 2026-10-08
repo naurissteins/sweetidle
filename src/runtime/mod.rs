@@ -135,10 +135,10 @@ impl IdleRuntime {
         &mut self,
         timeout: Option<Duration>,
     ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
-        // route inhibitor changes before idle events from the same wakeup
         self.event_loop
             .dispatch(timeout, &mut self.state)
             .map_err(RuntimeError::Dispatch)?;
+        // release completed command slots before routing events that may reuse them
         self.state.collect_ready_processes()?;
 
         if self.state.shutdown_requested() {
@@ -146,12 +146,14 @@ impl IdleRuntime {
             return Ok(self.state.take_runtime_events());
         }
 
+        // apply D-Bus and systemd inhibition before Wayland events from the same wakeup
         self.state.route_dbus_inhibit_events()?;
         self.state.route_reload_events()?;
         self.state.route_session_events()?;
         self.state.route_wayland_events()?;
         self.state.route_control_events()?;
         self.flush_idle_hint_updates()?;
+        // dispatch only after routing so pause and sleep-resume cleanup can affect queued intents
         self.state
             .dispatch_command_intents(&self.event_loop.handle())?;
 

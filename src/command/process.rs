@@ -46,7 +46,7 @@ pub enum ProcessError {
 
 impl ProcessAdapter {
     pub fn spawn(&mut self, request: &SpawnRequest) -> Result<ProcessStart, ProcessError> {
-        // configured commands use the shell and discard standard streams
+        // hooks must not read the daemon's stdin or write into its terminal and logs
         let child = Command::new("sh")
             .arg("-c")
             .arg(&request.command)

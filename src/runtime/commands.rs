@@ -21,6 +21,7 @@ pub(super) struct CommandRuntime {
     dispatcher: CommandDispatcher,
     processes: ProcessAdapter,
     ready_processes: Vec<CommandId>,
+    // reaping can precede another child's pidfd callback, which must not fail or repeat completion
     completed_before_monitor: HashSet<CommandId>,
     delay_inhibitors: HashMap<CommandId, Vec<DelayInhibitor>>,
 }
@@ -76,7 +77,6 @@ impl CommandRuntime {
         &mut self,
         events: &mut Vec<RuntimeEvent>,
     ) -> Result<(), RuntimeError> {
-        // children may finish before their pidfd source is registered
         let ready = std::mem::take(&mut self.ready_processes);
         if ready.is_empty() {
             return Ok(());
@@ -132,6 +132,7 @@ impl CommandRuntime {
         match decision {
             DispatchDecision::Skip(decision) => {
                 if let Some(inhibitor) = inhibitor {
+                    // a new sleep attempt must still wait for its already-running before-sleep hook
                     let SkipReason::AlreadyRunning(command_id) = decision.reason;
                     self.delay_inhibitors
                         .entry(command_id)
@@ -186,6 +187,7 @@ fn register_process_monitor(
     })?;
     let command_id = start.command_id;
 
+    // level readiness catches prior exits; removing the source prevents repeated wakeups
     handle
         .insert_source(
             Generic::new(pidfd, Interest::READ, Mode::Level),

@@ -46,6 +46,7 @@ impl LogindWorker {
         let proxy = LogindManagerProxy::new(&connection)
             .await
             .map_err(|source| SessionError::CreateProxy(Box::new(source)))?;
+        // subscribe before acquiring the delay inhibitor or querying sleep state to catch transitions
         let sleep_signals = if features.sleep_events {
             Some(
                 proxy
