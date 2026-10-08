@@ -140,6 +140,7 @@ struct ScreenSaverService {
 }
 
 struct SharedState {
+    // emit changes under this lock so active counts reach the runtime in registry mutation order
     registry: Mutex<InhibitorRegistry>,
     events: EventSender<DbusInhibitEvent>,
 }
