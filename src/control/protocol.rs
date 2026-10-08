@@ -69,10 +69,7 @@ impl StatusSnapshot {
             .iter()
             .map(|listener| JsonListenerStatus {
                 id: listener.listener_id.index(),
-                state: match listener.phase {
-                    ListenerPhase::Armed => "armed",
-                    ListenerPhase::TimedOut => "timed-out",
-                },
+                state: listener_phase_label(listener.phase),
                 timeout_seconds: listener.timeout.as_secs(),
                 ignore_inhibit: listener.inhibit_policy == InhibitPolicy::Ignore,
             })
@@ -179,10 +176,7 @@ impl fmt::Display for StatusSnapshot {
         } else {
             writeln!(formatter, "listeners:")?;
             for listener in &self.listeners {
-                let phase = match listener.phase {
-                    ListenerPhase::Armed => "armed",
-                    ListenerPhase::TimedOut => "timed-out",
-                };
+                let phase = listener_phase_label(listener.phase);
                 let inhibitors = match listener.inhibit_policy {
                     InhibitPolicy::Respect => "respected",
                     InhibitPolicy::Ignore => "ignored",
@@ -220,6 +214,13 @@ impl fmt::Display for StatusSnapshot {
     }
 }
 
+fn listener_phase_label(phase: ListenerPhase) -> &'static str {
+    match phase {
+        ListenerPhase::Armed => "armed",
+        ListenerPhase::TimedOut => "timed-out",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -229,6 +230,74 @@ mod tests {
         listener::{InhibitPolicy, ListenerId, ListenerPhase, ListenerStatus},
         session::SystemdIdleInhibitor,
     };
+
+    #[test]
+    fn formats_each_listener_phase_and_policy_in_both_status_formats() {
+        for (phase, policy, state_label, policy_label, ignore_inhibit) in [
+            (
+                ListenerPhase::Armed,
+                InhibitPolicy::Respect,
+                "armed",
+                "respected",
+                false,
+            ),
+            (
+                ListenerPhase::Armed,
+                InhibitPolicy::Ignore,
+                "armed",
+                "ignored",
+                true,
+            ),
+            (
+                ListenerPhase::TimedOut,
+                InhibitPolicy::Respect,
+                "timed-out",
+                "respected",
+                false,
+            ),
+            (
+                ListenerPhase::TimedOut,
+                InhibitPolicy::Ignore,
+                "timed-out",
+                "ignored",
+                true,
+            ),
+        ] {
+            let status = StatusSnapshot {
+                paused: false,
+                listeners: vec![ListenerStatus {
+                    listener_id: ListenerId::from_index(0),
+                    timeout: Duration::from_secs(300),
+                    inhibit_policy: policy,
+                    phase,
+                }],
+                dbus_inhibitors: Vec::new(),
+                systemd_inhibitors: Vec::new(),
+                idle_hint: None,
+            };
+
+            assert_eq!(
+                status.to_string(),
+                format!(
+                    "sweetsidle: running\ntracked inhibitors active: false\nidle hint: disabled\nlisteners:\n  - id=0 state={state_label} timeout=300s inhibitors={policy_label}\ntracked inhibitors: none\n"
+                )
+            );
+            let rendered = status
+                .render(StatusFormat::Json)
+                .unwrap_or_else(|error| panic!("JSON status failed: {error}"));
+            let value: serde_json::Value = serde_json::from_str(&rendered)
+                .unwrap_or_else(|error| panic!("JSON status was invalid: {error}"));
+            assert_eq!(
+                value["listeners"],
+                serde_json::json!([{
+                    "id": 0,
+                    "state": state_label,
+                    "timeout_seconds": 300,
+                    "ignore_inhibit": ignore_inhibit,
+                }])
+            );
+        }
+    }
 
     #[test]
     fn formats_listener_and_inhibitor_details() {
