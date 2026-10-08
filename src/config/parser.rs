@@ -78,14 +78,15 @@ struct GeneralDocument {
 
 impl Default for GeneralDocument {
     fn default() -> Self {
+        let defaults = GeneralConfig::default();
         Self {
-            lock_command: None,
-            unlock_command: None,
-            before_sleep_command: None,
-            after_resume_command: None,
-            wait_before_sleep: true,
-            ignore_dbus_inhibit: false,
-            ignore_systemd_inhibit: false,
+            lock_command: defaults.lock_command,
+            unlock_command: defaults.unlock_command,
+            before_sleep_command: defaults.before_sleep_command,
+            after_resume_command: defaults.after_resume_command,
+            wait_before_sleep: defaults.wait_before_sleep,
+            ignore_dbus_inhibit: defaults.ignore_dbus_inhibit,
+            ignore_systemd_inhibit: defaults.ignore_systemd_inhibit,
         }
     }
 }
@@ -177,7 +178,7 @@ fn optional_command(field: &str, value: Option<String>) -> Result<Option<String>
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, ConfigError, MAX_TIMEOUT_SECONDS};
+    use super::{Config, ConfigError, GeneralConfig, MAX_TIMEOUT_SECONDS};
 
     #[test]
     fn parses_general_idle_hint_and_listeners() {
@@ -232,6 +233,40 @@ on_resume = "sweetsmsg output '*' power on"
         assert!(config.general.wait_before_sleep);
         assert!(!config.general.ignore_dbus_inhibit);
         assert!(!config.general.ignore_systemd_inhibit);
+        assert_eq!(config, Config::default());
+    }
+
+    #[test]
+    fn empty_general_table_uses_model_defaults() {
+        let config = Config::parse("[general]\n").unwrap_or_else(|error| panic!("{error}"));
+
+        assert_eq!(config, Config::default());
+    }
+
+    #[test]
+    fn partial_general_table_keeps_explicit_values_and_defaults_omitted_fields() {
+        let source = r#"
+[general]
+lock_command = "  sweetslock  "
+wait_before_sleep = false
+ignore_dbus_inhibit = true
+ignore_systemd_inhibit = true
+"#;
+        let config = Config::parse(source).unwrap_or_else(|error| panic!("{error}"));
+
+        assert_eq!(
+            config,
+            Config {
+                general: GeneralConfig {
+                    lock_command: Some("sweetslock".to_string()),
+                    wait_before_sleep: false,
+                    ignore_dbus_inhibit: true,
+                    ignore_systemd_inhibit: true,
+                    ..GeneralConfig::default()
+                },
+                ..Config::default()
+            }
+        );
     }
 
     #[test]
