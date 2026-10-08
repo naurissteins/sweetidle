@@ -3,7 +3,7 @@ use std::time::Duration;
 use calloop::LoopHandle;
 
 use super::{
-    RuntimeError, RuntimeEvent, ShutdownSignal,
+    InhibitorChange, RuntimeError, RuntimeEvent, ShutdownSignal,
     commands::CommandRuntime,
     inhibition::{InhibitionState, Transition},
     reload::{ConfigReloadEvent, ConfigReloadRequester},
@@ -306,30 +306,15 @@ impl RuntimeState {
         for event in std::mem::take(&mut self.dbus_inhibit_events) {
             let transition = self.inhibition.apply_dbus(&event);
             self.apply_idle_inhibition_transition(transition)?;
-            match event {
+            let (change, inhibitor, active_count) = match event {
                 DbusInhibitEvent::Added {
                     inhibitor,
                     active_count,
-                } => {
-                    self.runtime_events.push(RuntimeEvent::DbusInhibitorAdded {
-                        cookie: inhibitor.cookie,
-                        application: inhibitor.application,
-                        reason: inhibitor.reason,
-                        active_count,
-                    });
-                }
+                } => (InhibitorChange::Added, inhibitor, active_count),
                 DbusInhibitEvent::Removed {
                     inhibitor,
                     active_count,
-                } => {
-                    self.runtime_events
-                        .push(RuntimeEvent::DbusInhibitorRemoved {
-                            cookie: inhibitor.cookie,
-                            application: inhibitor.application,
-                            reason: inhibitor.reason,
-                            active_count,
-                        });
-                }
+                } => (InhibitorChange::Removed, inhibitor, active_count),
                 DbusInhibitEvent::OwnerDisconnected {
                     owner,
                     released_count,
@@ -341,11 +326,20 @@ impl RuntimeState {
                             released_count,
                             active_count,
                         });
+                    continue;
                 }
                 DbusInhibitEvent::Failed(error) => {
                     return Err(RuntimeError::DbusInhibit(error));
                 }
-            }
+            };
+            self.runtime_events
+                .push(RuntimeEvent::DbusInhibitorChanged {
+                    change,
+                    cookie: inhibitor.cookie,
+                    application: inhibitor.application,
+                    reason: inhibitor.reason,
+                    active_count,
+                });
         }
 
         if self.dbus_inhibit_channel_closed {
@@ -623,7 +617,7 @@ mod tests {
         listener::{
             CommandIntent, CommandKind, ListenerError, ListenerId, ListenerPhase, ListenerSet,
         },
-        runtime::{RuntimeError, RuntimeEvent, ShutdownSignal},
+        runtime::{InhibitorChange, RuntimeError, RuntimeEvent, ShutdownSignal},
         session::{DbusInhibitEvent, InhibitorInfo, SessionEvent, SystemdIdleInhibitor},
         wayland::{IdleEvent, IdleWaylandState},
     };
@@ -957,6 +951,69 @@ mod tests {
                 RuntimeEvent::UnlockRequested
             ]
         ));
+    }
+
+    #[test]
+    fn dbus_inhibitor_runtime_events_preserve_order_and_payloads() {
+        let mut state = runtime_state();
+        state.record_dbus_inhibit_event(DbusInhibitEvent::Added {
+            inhibitor: inhibitor_info(7),
+            active_count: 1,
+        });
+        state.record_dbus_inhibit_event(DbusInhibitEvent::OwnerDisconnected {
+            owner: ":1.7".to_string(),
+            released_count: 1,
+            active_count: 0,
+        });
+        state.record_dbus_inhibit_event(DbusInhibitEvent::Added {
+            inhibitor: inhibitor_info(8),
+            active_count: 1,
+        });
+        state.record_dbus_inhibit_event(DbusInhibitEvent::Removed {
+            inhibitor: inhibitor_info(8),
+            active_count: 0,
+        });
+
+        assert_runtime_ok(state.route_dbus_inhibit_events());
+
+        let events = state.take_runtime_events();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    RuntimeEvent::DbusInhibitorChanged {
+                        change: InhibitorChange::Added,
+                        cookie: 7,
+                        application: first_application,
+                        reason: first_reason,
+                        active_count: 1,
+                    },
+                    RuntimeEvent::DbusInhibitorOwnerDisconnected {
+                        owner,
+                        released_count: 1,
+                        active_count: 0,
+                    },
+                    RuntimeEvent::DbusInhibitorChanged {
+                        change: InhibitorChange::Added,
+                        cookie: 8,
+                        application: second_application,
+                        reason: second_reason,
+                        active_count: 1,
+                    },
+                    RuntimeEvent::DbusInhibitorChanged {
+                        change: InhibitorChange::Removed,
+                        cookie: 8,
+                        application: removed_application,
+                        reason: removed_reason,
+                        active_count: 0,
+                    },
+                ] if first_application == "test application" && first_reason == "test reason"
+                    && owner == ":1.7"
+                    && second_application == "test application" && second_reason == "test reason"
+                    && removed_application == "test application" && removed_reason == "test reason"
+            ),
+            "unexpected inhibitor events: {events:?}"
+        );
     }
 
     #[test]
