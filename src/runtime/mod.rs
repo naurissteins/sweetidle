@@ -29,6 +29,12 @@ use crate::{
     wayland::{IdleWaylandError, IdleWaylandParts},
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InhibitorChange {
+    Added,
+    Removed,
+}
+
 #[derive(Debug)]
 pub enum RuntimeEvent {
     ShutdownRequested(ShutdownSignal),
@@ -44,13 +50,8 @@ pub enum RuntimeEvent {
     IdleHintChanged {
         idle: bool,
     },
-    DbusInhibitorAdded {
-        cookie: u32,
-        application: String,
-        reason: String,
-        active_count: usize,
-    },
-    DbusInhibitorRemoved {
+    DbusInhibitorChanged {
+        change: InhibitorChange,
         cookie: u32,
         application: String,
         reason: String,

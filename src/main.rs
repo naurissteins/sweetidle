@@ -4,7 +4,7 @@ use sweetsidle::{
     ProcessError,
     config::Config,
     control,
-    runtime::{ConfigReloadOutcome, IdleRuntime, RuntimeEvent},
+    runtime::{ConfigReloadOutcome, IdleRuntime, InhibitorChange, RuntimeEvent},
 };
 use tracing::{debug, error, info, warn};
 
@@ -305,28 +305,18 @@ fn handle_runtime_event(event: RuntimeEvent) -> RuntimeControl {
             debug!(idle, "logind session idle hint changed");
             RuntimeControl::Continue
         }
-        RuntimeEvent::DbusInhibitorAdded {
+        RuntimeEvent::DbusInhibitorChanged {
+            change,
             cookie,
             application,
             reason,
             active_count,
         } => {
-            debug!(
-                cookie,
-                application, reason, active_count, "D-Bus idle inhibitor added"
-            );
-            RuntimeControl::Continue
-        }
-        RuntimeEvent::DbusInhibitorRemoved {
-            cookie,
-            application,
-            reason,
-            active_count,
-        } => {
-            debug!(
-                cookie,
-                application, reason, active_count, "D-Bus idle inhibitor removed"
-            );
+            let message = match change {
+                InhibitorChange::Added => "D-Bus idle inhibitor added",
+                InhibitorChange::Removed => "D-Bus idle inhibitor removed",
+            };
+            debug!(cookie, application, reason, active_count, "{message}");
             RuntimeControl::Continue
         }
         RuntimeEvent::DbusInhibitorOwnerDisconnected {
@@ -444,9 +434,79 @@ fn default_config_path() -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        io::{self, Write},
+        path::PathBuf,
+        sync::{Arc, Mutex},
+    };
 
-    use super::{Action, StatusOutput, parse_args};
+    use super::{
+        Action, InhibitorChange, RuntimeControl, RuntimeEvent, StatusOutput, handle_runtime_event,
+        parse_args,
+    };
+
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|error| panic!("log buffer poisoned: {error}"))
+                .write(bytes)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn dbus_inhibitor_logs_preserve_messages_and_fields() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = Arc::clone(&output);
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_target(false)
+            .without_time()
+            .with_writer(move || LogBuffer(Arc::clone(&writer)))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            for event in [
+                RuntimeEvent::DbusInhibitorChanged {
+                    change: InhibitorChange::Added,
+                    cookie: 7,
+                    application: "test application".to_string(),
+                    reason: "test reason".to_string(),
+                    active_count: 1,
+                },
+                RuntimeEvent::DbusInhibitorChanged {
+                    change: InhibitorChange::Removed,
+                    cookie: 7,
+                    application: "test application".to_string(),
+                    reason: "test reason".to_string(),
+                    active_count: 0,
+                },
+            ] {
+                assert!(matches!(
+                    handle_runtime_event(event),
+                    RuntimeControl::Continue
+                ));
+            }
+        });
+
+        let output = output
+            .lock()
+            .unwrap_or_else(|error| panic!("log buffer poisoned: {error}"));
+        assert_eq!(
+            String::from_utf8_lossy(&output),
+            concat!(
+                "DEBUG D-Bus idle inhibitor added cookie=7 application=\"test application\" reason=\"test reason\" active_count=1\n",
+                "DEBUG D-Bus idle inhibitor removed cookie=7 application=\"test application\" reason=\"test reason\" active_count=0\n",
+            )
+        );
+    }
 
     #[test]
     fn no_arguments_runs_with_the_default_config() {
