@@ -84,8 +84,8 @@ enum RuntimeSignal {
 impl RuntimeSignal {
     fn name(self) -> &'static str {
         match self {
-            Self::Interrupt => "SIGINT",
-            Self::Terminate => "SIGTERM",
+            Self::Interrupt => ShutdownSignal::Interrupt.name(),
+            Self::Terminate => ShutdownSignal::Terminate.name(),
             Self::Reload => "SIGHUP",
         }
     }

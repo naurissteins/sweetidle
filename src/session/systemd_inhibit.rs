@@ -1,4 +1,4 @@
-const MAX_DIAGNOSTIC_CHARS: usize = 256;
+use super::inhibit::diagnostic_text;
 
 pub(crate) type LogindInhibitor = (String, String, String, String, u32, u32);
 
@@ -30,13 +30,9 @@ pub(crate) fn idle_block_inhibitors(inhibitors: Vec<LogindInhibitor>) -> Vec<Sys
     inhibitors
 }
 
-fn diagnostic_text(value: &str) -> String {
-    value.chars().take(MAX_DIAGNOSTIC_CHARS).collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{MAX_DIAGNOSTIC_CHARS, SystemdIdleInhibitor, idle_block_inhibitors};
+    use super::{SystemdIdleInhibitor, idle_block_inhibitors};
 
     #[test]
     fn selects_only_block_mode_idle_inhibitors() {
@@ -73,15 +69,34 @@ mod tests {
 
     #[test]
     fn bounds_diagnostic_text_and_sorts_snapshots() {
-        let long = "x".repeat(MAX_DIAGNOSTIC_CHARS + 10);
+        let long = "x".repeat(256 + 10);
         let inhibitors = idle_block_inhibitors(vec![
             inhibitor("idle", "z-last", "reason", "block", 1000, 30),
             inhibitor("idle", &long, &long, "block", 1000, 20),
         ]);
 
-        assert_eq!(inhibitors[0].who.chars().count(), MAX_DIAGNOSTIC_CHARS);
-        assert_eq!(inhibitors[0].why.chars().count(), MAX_DIAGNOSTIC_CHARS);
+        assert_eq!(inhibitors[0].who.chars().count(), 256);
+        assert_eq!(inhibitors[0].why.chars().count(), 256);
         assert_eq!(inhibitors[1].who, "z-last");
+    }
+
+    #[test]
+    fn diagnostic_bounds_preserve_short_text_and_multibyte_character_boundaries() {
+        for (input, expected) in [
+            (String::new(), String::new()),
+            ("short text".to_string(), "short text".to_string()),
+            ("é🦀".to_string(), "é🦀".to_string()),
+            ("x".repeat(256), "x".repeat(256)),
+            ("é🦀".repeat(128), "é🦀".repeat(128)),
+            ("é🦀".repeat(138), "é🦀".repeat(128)),
+        ] {
+            let inhibitors =
+                idle_block_inhibitors(vec![inhibitor("idle", &input, &input, "block", 1000, 20)]);
+
+            assert_eq!(inhibitors.len(), 1);
+            assert_eq!(inhibitors[0].who, expected);
+            assert_eq!(inhibitors[0].why, expected);
+        }
     }
 
     fn inhibitor(

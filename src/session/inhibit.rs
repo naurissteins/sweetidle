@@ -106,7 +106,7 @@ impl InhibitorRegistry {
     }
 }
 
-fn diagnostic_text(value: &str) -> String {
+pub(super) fn diagnostic_text(value: &str) -> String {
     value.chars().take(MAX_DIAGNOSTIC_CHARS).collect()
 }
 
@@ -175,6 +175,24 @@ mod tests {
 
         assert_eq!(info.application.chars().count(), MAX_DIAGNOSTIC_CHARS);
         assert_eq!(info.reason.chars().count(), MAX_DIAGNOSTIC_CHARS);
+    }
+
+    #[test]
+    fn diagnostic_bounds_preserve_short_text_and_multibyte_character_boundaries() {
+        let mut registry = InhibitorRegistry::default();
+        for (input, expected) in [
+            (String::new(), String::new()),
+            ("short text".to_string(), "short text".to_string()),
+            ("é🦀".to_string(), "é🦀".to_string()),
+            ("x".repeat(256), "x".repeat(256)),
+            ("é🦀".repeat(128), "é🦀".repeat(128)),
+            ("é🦀".repeat(138), "é🦀".repeat(128)),
+        ] {
+            let info = add(&mut registry, ":1.1", &input, &input);
+
+            assert_eq!(info.application, expected);
+            assert_eq!(info.reason, expected);
+        }
     }
 
     fn add(
