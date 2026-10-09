@@ -140,10 +140,12 @@ impl RuntimeState {
             .collect_ready_processes(&mut self.runtime_events)
     }
 
+    #[must_use = "drained runtime events must be handled"]
     pub(super) fn take_runtime_events(&mut self) -> Vec<RuntimeEvent> {
         std::mem::take(&mut self.runtime_events)
     }
 
+    #[must_use = "drained idle-hint updates must be sent to logind"]
     pub(super) fn take_idle_hint_updates(&mut self) -> Vec<bool> {
         std::mem::take(&mut self.idle_hint_updates)
     }
@@ -764,8 +766,8 @@ mod tests {
     fn applying_config_restarts_an_active_idle_hint() {
         let mut state = idle_hint_runtime_state();
         assert_runtime_ok(state.route_idle_event(IdleEvent::IdleHintIdled));
-        state.take_idle_hint_updates();
-        state.take_runtime_events();
+        let _ = state.take_idle_hint_updates();
+        let _ = state.take_runtime_events();
         let config = Config {
             idle_hint_timeout_seconds: Some(600),
             ..Config::default()
@@ -931,8 +933,8 @@ mod tests {
     fn inhibition_clears_an_active_idle_hint() {
         let mut state = idle_hint_runtime_state();
         assert_runtime_ok(state.route_idle_event(IdleEvent::IdleHintIdled));
-        state.take_idle_hint_updates();
-        state.take_runtime_events();
+        let _ = state.take_idle_hint_updates();
+        let _ = state.take_runtime_events();
         state.record_dbus_inhibit_event(DbusInhibitEvent::Added {
             inhibitor: inhibitor_info(1),
             active_count: 1,
@@ -953,8 +955,8 @@ mod tests {
     fn unlock_clears_an_active_idle_hint() {
         let mut state = idle_hint_runtime_state();
         assert_runtime_ok(state.route_idle_event(IdleEvent::IdleHintIdled));
-        state.take_idle_hint_updates();
-        state.take_runtime_events();
+        let _ = state.take_idle_hint_updates();
+        let _ = state.take_runtime_events();
         state.record_session_event(SessionEvent::UnlockRequested);
 
         assert_runtime_ok(state.route_session_events());
@@ -1040,7 +1042,7 @@ mod tests {
             active_count: 1,
         });
         assert_runtime_ok(state.route_dbus_inhibit_events());
-        state.take_runtime_events();
+        let _ = state.take_runtime_events();
 
         assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(0))));
 
@@ -1062,7 +1064,7 @@ mod tests {
             systemd_inhibitor(20),
         ]));
         assert_runtime_ok(state.route_session_events());
-        state.take_runtime_events();
+        let _ = state.take_runtime_events();
 
         assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(0))));
 
@@ -1085,7 +1087,7 @@ mod tests {
             active_count: 1,
         });
         assert_runtime_ok(state.route_dbus_inhibit_events());
-        state.take_runtime_events();
+        let _ = state.take_runtime_events();
 
         assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(0))));
 
@@ -1175,7 +1177,7 @@ mod tests {
     fn paused_runtime_suppresses_idle_events() {
         let mut state = runtime_state();
         assert!(state.pause_idle());
-        state.take_runtime_events();
+        let _ = state.take_runtime_events();
 
         assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(0))));
 
@@ -1187,7 +1189,7 @@ mod tests {
     fn pausing_clears_an_active_idle_hint() {
         let mut state = idle_hint_runtime_state();
         assert_runtime_ok(state.route_idle_event(IdleEvent::IdleHintIdled));
-        state.take_idle_hint_updates();
+        let _ = state.take_idle_hint_updates();
 
         assert!(state.pause_idle());
 
@@ -1222,8 +1224,8 @@ mod tests {
     fn paused_runtime_accounts_for_both_sources_without_resetting_notifications() {
         let mut state = idle_hint_runtime_state();
         assert!(state.pause_idle());
-        state.take_runtime_events();
-        state.take_idle_hint_updates();
+        let _ = state.take_runtime_events();
+        let _ = state.take_idle_hint_updates();
         let queued = IdleEvent::Idled(ListenerId::from_index(0));
         state.wayland.record(queued);
 
@@ -1281,7 +1283,7 @@ mod tests {
         assert_runtime_ok(state.route_dbus_inhibit_events());
 
         assert!(matches!(state.resume_idle(), Ok(true)));
-        state.take_runtime_events();
+        let _ = state.take_runtime_events();
         assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(0))));
         assert!(state.command_intents.is_empty());
         assert!(matches!(
@@ -1302,7 +1304,7 @@ mod tests {
             active_count: 1,
         });
         assert_runtime_ok(state.route_dbus_inhibit_events());
-        state.take_runtime_events();
+        let _ = state.take_runtime_events();
         let previous = state.status_snapshot();
         state.record_dbus_inhibit_event(DbusInhibitEvent::Failed(
             crate::session::DbusInhibitError::Disconnected,
