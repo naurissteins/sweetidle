@@ -160,12 +160,11 @@ struct RunningProcess {
 
 #[cfg(test)]
 mod tests {
-    use std::{thread, time::Duration};
-
     use rustix::process::{Pid, getpgid};
 
     use super::{CommandContext, CommandId, ProcessAdapter, SpawnRequest};
     use crate::listener::{CommandKind, ListenerId};
+    use crate::test_support::TestDeadline;
 
     #[test]
     fn spawns_and_collects_a_finished_command() {
@@ -273,7 +272,8 @@ mod tests {
     }
 
     fn wait_for_completion(processes: &mut ProcessAdapter) -> Vec<super::ProcessCompletion> {
-        for _ in 0..50 {
+        let deadline = TestDeadline::new();
+        loop {
             let completions = match processes.collect_finished() {
                 Ok(completions) => completions,
                 Err(error) => panic!("{error}"),
@@ -283,9 +283,7 @@ mod tests {
                 return completions;
             }
 
-            thread::sleep(Duration::from_millis(10));
+            deadline.wait("command completion");
         }
-
-        panic!("command did not finish");
     }
 }

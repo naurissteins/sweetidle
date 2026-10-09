@@ -9,6 +9,7 @@ use calloop::EventLoop;
 
 use super::{RuntimeEvent, state::RuntimeState};
 use crate::session::DelayInhibitor;
+use crate::test_support::TestDeadline;
 
 pub(super) fn new_event_loop() -> EventLoop<'static, RuntimeState> {
     match EventLoop::try_new() {
@@ -21,8 +22,12 @@ pub(super) fn wait_for_process_events(
     event_loop: &mut EventLoop<'static, RuntimeState>,
     state: &mut RuntimeState,
 ) -> Vec<RuntimeEvent> {
-    for _ in 0..20 {
-        if let Err(error) = event_loop.dispatch(Some(Duration::from_millis(100)), state) {
+    let deadline = TestDeadline::new();
+    loop {
+        let wait = deadline
+            .remaining("command lifecycle event")
+            .min(Duration::from_millis(100));
+        if let Err(error) = event_loop.dispatch(Some(wait), state) {
             panic!("{error}");
         }
         if let Err(error) = state.collect_ready_processes() {
@@ -33,8 +38,6 @@ pub(super) fn wait_for_process_events(
             return events;
         }
     }
-
-    panic!("command did not finish");
 }
 
 pub(super) fn assert_inhibitor_released(observer: &mut UnixStream) {

@@ -96,9 +96,10 @@ enum WorkerRequest {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::mpsc::TryRecvError, thread, time::Duration};
+    use std::{path::PathBuf, sync::mpsc::TryRecvError};
 
     use super::{ConfigReloadEvent, ConfigReloadMonitor};
+    use crate::test_support::TestDeadline;
 
     #[test]
     fn request_loads_config_on_the_worker() {
@@ -111,7 +112,8 @@ mod tests {
             panic!("failed to request config reload: {error}");
         }
 
-        for _ in 0..100 {
+        let deadline = TestDeadline::new();
+        loop {
             match events.try_recv() {
                 Ok(ConfigReloadEvent::Ready(config)) => {
                     assert_eq!(config.listeners.len(), 2);
@@ -121,11 +123,9 @@ mod tests {
                 Ok(ConfigReloadEvent::Rejected(error)) => {
                     panic!("worker rejected example config: {error}");
                 }
-                Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(10)),
+                Err(TryRecvError::Empty) => deadline.wait("config reload"),
                 Err(TryRecvError::Disconnected) => panic!("reload result channel closed"),
             }
         }
-
-        panic!("timed out waiting for config reload");
     }
 }
