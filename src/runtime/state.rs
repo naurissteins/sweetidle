@@ -95,18 +95,21 @@ impl RuntimeState {
     }
 
     pub(super) fn apply_config(&mut self, config: &Config) -> Result<(), RuntimeError> {
-        let listeners = ListenerSet::from_config(config);
+        let reload = self
+            .listeners
+            .prepare_reload(config)
+            .map_err(RuntimeError::Listener)?;
         self.wayland.reconfigure_notifications(
-            &listeners.timeout_requests(),
+            &reload.listeners.timeout_requests(),
             config.idle_hint_timeout_seconds.map(Duration::from_secs),
+            &reload.retained_ids,
         )?;
         if self.paused {
             self.wayland.pause_notifications();
         }
 
-        self.commands
-            .remap_listener_slots(&self.listeners.matching_listener_ids(&listeners));
-        self.listeners = listeners;
+        self.commands.remap_listener_slots(&reload.matching_ids);
+        self.listeners = reload.listeners;
         self.session_commands = SessionCommands::from(&config.general);
         self.set_idle_hint(false);
 
@@ -793,6 +796,61 @@ mod tests {
             state.command_intents,
             vec![intent(0, CommandKind::Timeout, "new lock")]
         );
+    }
+
+    #[test]
+    fn reload_preserves_phase_and_resume_routing_after_reordering() {
+        let mut config = runtime_config();
+        config.listeners[0].on_resume = Some("resume lock".into());
+        let mut state = runtime_state_from_config(&config);
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(0))));
+        state.command_intents.clear();
+        config.listeners.swap(0, 1);
+
+        assert_runtime_ok(state.apply_config(&config));
+        assert_eq!(
+            state.status_snapshot().listeners[1].phase,
+            ListenerPhase::TimedOut
+        );
+        assert!(state.command_intents.is_empty());
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(1))));
+        assert!(state.command_intents.is_empty());
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Resumed(ListenerId::from_index(0))));
+        assert!(state.command_intents.is_empty());
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Resumed(ListenerId::from_index(1))));
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Resumed(ListenerId::from_index(1))));
+        assert_eq!(
+            state.command_intents,
+            [intent(1, CommandKind::Resume, "resume lock")]
+        );
+    }
+
+    #[test]
+    fn rejected_timed_out_change_keeps_hooks_slots_and_phases() {
+        let mut state = runtime_state();
+        assert_runtime_ok(state.route_idle_event(IdleEvent::Idled(ListenerId::from_index(0))));
+        let _ = state
+            .commands
+            .reserve_listener(intent(0, CommandKind::Timeout, "lock"));
+        let before = state.status_snapshot();
+        let mut config = runtime_config();
+        config.listeners[0].timeout_seconds += 1;
+        config.general.lock_command = Some("changed hook".into());
+
+        assert!(matches!(
+            state.apply_config(&config),
+            Err(RuntimeError::Listener(
+                ListenerError::TimedOutListenerChanged(_)
+            ))
+        ));
+        assert_eq!(state.status_snapshot(), before);
+        assert_eq!(state.session_commands.lock, None);
+        assert!(matches!(
+            state
+                .commands
+                .reserve_listener(intent(0, CommandKind::Timeout, "lock")),
+            DispatchDecision::Skip(_)
+        ));
     }
 
     #[test]

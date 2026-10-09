@@ -73,11 +73,18 @@ If a reload is already pending, the response reports that it is pending.
 Requests received while a reload is pending are coalesced into one follow-up
 read, even if the pending read is rejected.
 Running commands continue across reloads.
+Unchanged timed-out listeners keep their idle cycle and notification, including
+after reordering; their own resume notification completes the cycle.
+Changing or removing a timed-out listener rejects the entire reload.
+Retry after that listener resumes.
+Other listeners and the idle-hint timer receive fresh timeouts on an applied reload.
 Unchanged listener definitions retain duplicate suppression even when reordered;
-changed or removed definitions release their old slots without stopping their
-commands.
+accepted changes or removals of armed definitions release their old slots
+without stopping their commands.
 A definition includes its timeout, timeout and resume commands, and inhibitor
 policy.
+Identical definitions match one-to-one, prioritizing timed-out copies over armed
+copies and then matching in configuration order.
 Session hook slots remain occupied across reloads until their commands exit.
 .SH OPTIONS
 .TP
@@ -250,6 +257,10 @@ Requests received while a reload is pending schedule the same coalesced
 follow-up read as the control command.
 Configuration and compositor compatibility validation failures are rejected
 and the complete last valid configuration remains active.
+Unchanged timed-out listeners retain their pending resume lifecycle;
+reload does not count as activity or repeat their timeout actions.
+Candidates that change or remove a timed-out listener are rejected and can be
+retried after that listener resumes.
 Changes that would alter required D-Bus or logind integrations require a daemon
 restart and are not applied partially.
 .SH ENVIRONMENT

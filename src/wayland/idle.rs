@@ -12,6 +12,8 @@ use wayland_protocols::ext::idle_notify::v1::client::{
 
 use crate::listener::{InhibitPolicy, ListenerId, TimeoutRequest};
 
+mod reload;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdleEvent {
     Idled(ListenerId),
@@ -181,6 +183,15 @@ impl IdleWaylandState {
                 || data.inhibition_generation == self.inhibition_generation)
     }
 
+    fn event_target(&self, data: &IdleNotificationData) -> Option<IdleNotificationTarget> {
+        // retained proxies still carry their creation-time id and generations after a reload
+        self.notifications
+            .iter()
+            .find(|notification| notification.data == *data)
+            .map(|notification| notification.target)
+            .or_else(|| self.accepts_generation(data).then_some(data.target))
+    }
+
     pub(crate) fn reset_notifications(&mut self) -> Result<(), IdleWaylandError> {
         self.configuration_generation = self.configuration_generation.wrapping_add(1);
         self.inhibition_generation = self.inhibition_generation.wrapping_add(1);
@@ -226,7 +237,7 @@ impl IdleWaylandState {
 
         let mut ignored = Vec::new();
         for notification in self.notifications.drain(..) {
-            if notification.inhibit_policy == InhibitPolicy::Respect {
+            if notification.data.inhibit_policy == InhibitPolicy::Respect {
                 notification.proxy.destroy();
             } else {
                 ignored.push(notification);
@@ -255,18 +266,6 @@ impl IdleWaylandState {
         )?);
 
         Ok(())
-    }
-
-    pub(crate) fn reconfigure_notifications(
-        &mut self,
-        listeners: &[TimeoutRequest],
-        idle_hint_timeout: Option<Duration>,
-    ) -> Result<(), IdleWaylandError> {
-        let requests = notification_requests(listeners, idle_hint_timeout);
-        validate_requests(&requests, self.notifier.as_ref().map(Proxy::version))?;
-
-        self.requests = requests;
-        self.reset_notifications()
     }
 
     pub(crate) fn validate_notifications(
@@ -347,7 +346,8 @@ fn create_notifications<'a>(
             };
             Ok(ActiveNotification {
                 proxy,
-                inhibit_policy: request.inhibit_policy,
+                data,
+                target: request.target,
             })
         })
         .collect()
@@ -435,7 +435,8 @@ struct IdleNotificationRequest {
 #[derive(Debug)]
 struct ActiveNotification {
     proxy: ExtIdleNotificationV1,
-    inhibit_policy: InhibitPolicy,
+    data: IdleNotificationData,
+    target: IdleNotificationTarget,
 }
 
 fn event_ignores_inhibitors(requests: &[IdleNotificationRequest], event: &IdleEvent) -> bool {
@@ -474,7 +475,7 @@ impl Dispatch<ExtIdleNotifierV1, ()> for IdleWaylandState {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct IdleNotificationData {
     target: IdleNotificationTarget,
     inhibit_policy: InhibitPolicy,
@@ -491,16 +492,16 @@ impl Dispatch<ExtIdleNotificationV1, IdleNotificationData> for IdleWaylandState 
         _connection: &Connection,
         _queue_handle: &QueueHandle<Self>,
     ) {
-        if !state.accepts_generation(data) {
+        let Some(target) = state.event_target(data) else {
             return;
-        }
+        };
 
         match event {
-            ext_idle_notification_v1::Event::Idled => state.record(match data.target {
+            ext_idle_notification_v1::Event::Idled => state.record(match target {
                 IdleNotificationTarget::Listener(listener_id) => IdleEvent::Idled(listener_id),
                 IdleNotificationTarget::IdleHint => IdleEvent::IdleHintIdled,
             }),
-            ext_idle_notification_v1::Event::Resumed => state.record(match data.target {
+            ext_idle_notification_v1::Event::Resumed => state.record(match target {
                 IdleNotificationTarget::Listener(listener_id) => IdleEvent::Resumed(listener_id),
                 IdleNotificationTarget::IdleHint => IdleEvent::IdleHintResumed,
             }),
@@ -592,7 +593,7 @@ mod tests {
         };
 
         assert!(matches!(
-            state.reconfigure_notifications(&[oversized], None),
+            state.reconfigure_notifications(&[oversized], None, &[]),
             Err(IdleWaylandError::TimeoutTooLarge { .. })
         ));
         assert_eq!(state.requests, vec![existing]);
@@ -613,6 +614,36 @@ mod tests {
             ]
         );
         assert!(state.take_events().is_empty());
+    }
+
+    #[test]
+    fn reload_remaps_only_queued_events_for_retained_listeners() {
+        let first = ListenerId::from_index(0);
+        let second = ListenerId::from_index(1);
+        let mut state = IdleWaylandState {
+            events: vec![
+                IdleEvent::Idled(first),
+                IdleEvent::Resumed(first),
+                IdleEvent::Idled(second),
+                IdleEvent::IdleHintIdled,
+            ],
+            ..IdleWaylandState::default()
+        };
+        assert!(
+            state
+                .reconfigure_notifications(
+                    &[request(0, 60), request(1, 60)],
+                    None,
+                    &[(first, second)]
+                )
+                .is_ok()
+        );
+
+        assert_eq!(
+            state.take_events(),
+            [IdleEvent::Idled(second), IdleEvent::Resumed(second)]
+        );
+        assert!(!state.accepts_generation(&notification_data(0, 0, InhibitPolicy::Ignore)));
     }
 
     #[test]

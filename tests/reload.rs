@@ -27,10 +27,131 @@ const WAIT_LIMIT: Duration = Duration::from_secs(5);
 
 #[test]
 #[ignore = "runs the real daemon against a private Wayland compositor"]
+fn reload_retains_timed_out_notification_and_runs_resume_once() -> Result<(), Box<dyn Error>> {
+    let mut harness = ReloadHarness::start_with_actions("timeout", Some("resume"), 1)?;
+    harness.wait_for_markers(1)?;
+    let source = fs::read_to_string(&harness.config_path)?;
+    fs::write(
+        &harness.config_path,
+        source.replace("[general]", "[general]\nwait_before_sleep = false"),
+    )?;
+    harness.signal_reload()?;
+    harness.wait_for_log("configuration reloaded")?;
+
+    assert!(harness.status()?.contains("state=timed-out"));
+    assert_eq!(harness.compositor.created()?, 1);
+    assert_eq!(harness.compositor.emit(1, MockEvent::Idle)?, 1);
+    assert!(harness.status()?.contains("state=timed-out"));
+    assert_eq!(harness.markers()?, ["timeout"]);
+    harness.resume_listener_cycle()?;
+    harness.wait_for_markers(2)?;
+    assert_eq!(harness.compositor.emit(1, MockEvent::Resume)?, 1);
+    assert!(harness.status()?.contains("state=armed"));
+    assert_eq!(harness.markers()?, ["timeout", "resume"]);
+    harness.stop()?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "runs the real daemon against a private Wayland compositor"]
+fn reordered_retained_proxy_resumes_its_new_listener_id() -> Result<(), Box<dyn Error>> {
+    let mut harness = ReloadHarness::start_with_actions("timeout", Some("resume"), 2)?;
+    harness.wait_for_markers(1)?;
+    let original = fs::read_to_string(&harness.config_path)?;
+    let second = "[[listener]]\ntimeout = 7200\nignore_inhibit = true\n";
+    fs::write(&harness.config_path, format!("{original}\n{second}"))?;
+    harness.signal_reload()?;
+    harness.wait_for_log("configuration reloaded")?;
+    let deadline = Instant::now() + WAIT_LIMIT;
+    loop {
+        let status: serde_json::Value = serde_json::from_str(&harness.status_json()?)?;
+        if status["listeners"].as_array().is_some_and(|listeners| {
+            listeners.len() == 2
+                && listeners
+                    .iter()
+                    .all(|listener| listener["state"] == "timed-out")
+        }) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("second listener did not time out".into());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let (general, first) = original
+        .split_once("[[listener]]")
+        .ok_or("missing listener")?;
+    fs::write(
+        &harness.config_path,
+        format!("{general}{second}\n[[listener]]{first}"),
+    )?;
+    harness.signal_reload()?;
+    harness.wait_for_log_count("configuration reloaded", 2)?;
+
+    assert_eq!(harness.compositor.created()?, 2);
+    assert_eq!(harness.compositor.emit(2, MockEvent::ResumeOne(0))?, 1);
+    harness.wait_for_markers(2)?;
+    assert_eq!(harness.markers()?, ["timeout", "resume"]);
+    let status: serde_json::Value = serde_json::from_str(&harness.status_json()?)?;
+    assert_eq!(status["listeners"][0]["state"], "timed-out");
+    assert_eq!(status["listeners"][1]["state"], "armed");
+    harness.stop()?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "runs the real daemon against a private Wayland compositor"]
+fn timed_out_listener_change_is_rejected_and_can_be_retried_after_resume()
+-> Result<(), Box<dyn Error>> {
+    let mut harness = ReloadHarness::start_with_actions("timeout", Some("resume"), 2)?;
+    harness.wait_for_markers(1)?;
+    let before = harness.status_json()?;
+    harness.write_config("changed")?;
+    harness.signal_reload()?;
+    harness.wait_for_log("cannot change or remove timed-out listener 0")?;
+
+    assert_eq!(harness.status_json()?, before);
+    assert_eq!(harness.compositor.created()?, 1);
+    harness.resume_listener_cycle()?;
+    harness.wait_for_markers(2)?;
+    harness.signal_reload()?;
+    harness.wait_for_markers(3)?;
+    assert_eq!(harness.markers()?, ["timeout", "resume", "changed"]);
+    harness.stop()?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "runs the real daemon against a private Wayland compositor"]
+fn timed_out_listener_removal_is_rejected_until_resume() -> Result<(), Box<dyn Error>> {
+    let mut harness = ReloadHarness::start_with_actions("timeout", Some("resume"), 2)?;
+    harness.wait_for_markers(1)?;
+    fs::write(
+        &harness.config_path,
+        "[general]\nignore_dbus_inhibit = true\nignore_systemd_inhibit = true\n",
+    )?;
+    harness.signal_reload()?;
+    harness.wait_for_log("cannot change or remove timed-out listener 0")?;
+
+    assert!(harness.status()?.contains("state=timed-out"));
+    assert_eq!(harness.compositor.created()?, 1);
+    harness.resume_listener_cycle()?;
+    harness.wait_for_markers(2)?;
+    harness.signal_reload()?;
+    harness.wait_for_log("configuration reloaded")?;
+    assert!(harness.status()?.contains("listeners: none"));
+    assert_eq!(harness.markers()?, ["timeout", "resume"]);
+    harness.stop()?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "runs the real daemon against a private Wayland compositor"]
 fn sighup_applies_valid_config_without_restarting_the_daemon() -> Result<(), Box<dyn Error>> {
     let mut harness = ReloadHarness::start("initial")?;
     harness.wait_for_markers(1)?;
 
+    harness.resume_listener_cycle()?;
     harness.write_config("reloaded")?;
     harness.signal_reload()?;
     harness.wait_for_markers(2)?;
@@ -47,6 +168,7 @@ fn control_reload_applies_valid_config_without_restarting_the_daemon() -> Result
     let mut harness = ReloadHarness::start("initial")?;
     harness.wait_for_markers(1)?;
 
+    harness.resume_listener_cycle()?;
     harness.write_config("reloaded")?;
     assert_eq!(harness.control("reload")?, "sweetsidle: reload requested\n");
     harness.wait_for_markers(2)?;
@@ -106,6 +228,7 @@ fn oversized_config_sighup_keeps_the_last_valid_config_active() -> Result<(), Bo
     harness.wait_for_markers(2)?;
 
     assert_eq!(harness.markers()?, ["active", "active"]);
+    harness.resume_listener_cycle()?;
     harness.write_config("recovered")?;
     harness.signal_reload()?;
     harness.wait_for_markers(3)?;
@@ -196,6 +319,7 @@ fn pause_suppresses_idle_actions_until_resume() -> Result<(), Box<dyn Error>> {
 fn foreground_group_interrupt_leaves_running_commands_alive() -> Result<(), Box<dyn Error>> {
     let mut harness = ReloadHarness::start("initial")?;
     harness.wait_for_markers(1)?;
+    harness.resume_listener_cycle()?;
     let marker_path = shell_quote(path_text(&harness.marker_path)?);
     let command = format!(
         "printf 'started\\n' >> {marker_path}; sleep 1; printf 'survived\\n' >> {marker_path}"
@@ -242,6 +366,14 @@ impl ReloadHarness {
         initial_marker: &str,
         notifier_version: u32,
     ) -> Result<Self, Box<dyn Error>> {
+        Self::start_with_actions(initial_marker, None, notifier_version)
+    }
+
+    fn start_with_actions(
+        initial_marker: &str,
+        resume_marker: Option<&str>,
+        notifier_version: u32,
+    ) -> Result<Self, Box<dyn Error>> {
         let temp_dir = tempfile::tempdir()?;
         let config_path = temp_dir.path().join("config.toml");
         let marker_path = temp_dir.path().join("commands.log");
@@ -253,6 +385,7 @@ impl ReloadHarness {
             &marker_path,
             initial_marker,
             notifier_version >= 2,
+            resume_marker,
         )?;
 
         let log = File::create(&log_path)?;
@@ -284,6 +417,20 @@ impl ReloadHarness {
         self.daemon.signal(Signal::HUP)
     }
 
+    fn resume_listener_cycle(&mut self) -> Result<(), Box<dyn Error>> {
+        assert_eq!(self.compositor.emit(1, MockEvent::Resume)?, 1);
+        let deadline = Instant::now() + WAIT_LIMIT;
+        loop {
+            if self.status()?.contains("state=armed") {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err("listener did not resume".into());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn wait_for_markers(&mut self, expected_count: usize) -> Result<(), Box<dyn Error>> {
         wait_until(&mut self.daemon, &self.log_path, || {
             marker_lines(&self.marker_path)
@@ -293,9 +440,13 @@ impl ReloadHarness {
     }
 
     fn wait_for_log(&mut self, expected: &str) -> Result<(), Box<dyn Error>> {
+        self.wait_for_log_count(expected, 1)
+    }
+
+    fn wait_for_log_count(&mut self, expected: &str, count: usize) -> Result<(), Box<dyn Error>> {
         wait_until(&mut self.daemon, &self.log_path, || {
             fs::read_to_string(&self.log_path)
-                .map(|log| log.contains(expected))
+                .map(|log| log.matches(expected).count() >= count)
                 .unwrap_or(false)
         })
     }
@@ -345,7 +496,7 @@ fn write_config(
     marker_path: &std::path::Path,
     marker: &str,
 ) -> Result<(), Box<dyn Error>> {
-    write_config_with_policy(config_path, marker_path, marker, true)
+    write_config_with_policy(config_path, marker_path, marker, true, None)
 }
 
 fn write_config_with_policy(
@@ -353,12 +504,19 @@ fn write_config_with_policy(
     marker_path: &std::path::Path,
     marker: &str,
     ignore_inhibit: bool,
+    resume_marker: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
     let marker_path = shell_quote(path_text(marker_path)?);
-    let command = format!("printf '%s\\n' {marker} >> {marker_path}");
-    let command = command.replace('\\', "\\\\").replace('"', "\\\"");
+    let command = |marker: &str| {
+        let command = format!("printf '%s\\n' {marker} >> {marker_path}");
+        command.replace('\\', "\\\\").replace('"', "\\\"")
+    };
+    let on_resume = resume_marker
+        .map(|marker| format!("on_resume = \"{}\"\n", command(marker)))
+        .unwrap_or_default();
+    let command = command(marker);
     let config = format!(
-        "[general]\nignore_dbus_inhibit = true\nignore_systemd_inhibit = true\n\n[[listener]]\ntimeout = 3600\non_timeout = \"{command}\"\nignore_inhibit = {ignore_inhibit}\n"
+        "[general]\nignore_dbus_inhibit = true\nignore_systemd_inhibit = true\n\n[[listener]]\ntimeout = 3600\non_timeout = \"{command}\"\n{on_resume}ignore_inhibit = {ignore_inhibit}\n"
     );
     fs::write(config_path, config)?;
     Ok(())
@@ -458,9 +616,19 @@ impl Drop for TestDaemon {
 enum CompositorCommand {
     Pulse {
         expected_notifications: usize,
+        event: MockEvent,
         reply: Sender<usize>,
     },
+    Created(Sender<usize>),
     Stop,
+}
+
+#[derive(Clone, Copy)]
+enum MockEvent {
+    Pulse,
+    Resume,
+    Idle,
+    ResumeOne(usize),
 }
 
 struct MockCompositor {
@@ -490,11 +658,26 @@ impl MockCompositor {
     }
 
     fn pulse(&self, expected_notifications: usize) -> Result<usize, Box<dyn Error>> {
+        self.emit(expected_notifications, MockEvent::Pulse)
+    }
+
+    fn emit(
+        &self,
+        expected_notifications: usize,
+        event: MockEvent,
+    ) -> Result<usize, Box<dyn Error>> {
         let (reply, received) = mpsc::channel();
         self.commands.send(CompositorCommand::Pulse {
             expected_notifications,
+            event,
             reply,
         })?;
+        received.recv_timeout(WAIT_LIMIT).map_err(Into::into)
+    }
+
+    fn created(&self) -> Result<usize, Box<dyn Error>> {
+        let (reply, received) = mpsc::channel();
+        self.commands.send(CompositorCommand::Created(reply))?;
         received.recv_timeout(WAIT_LIMIT).map_err(Into::into)
     }
 
@@ -529,6 +712,7 @@ fn run_compositor(
     let mut state = MockState::default();
     let mut pending_pulse = None;
     loop {
+        let mut created_reply = None;
         while let Some(stream) = socket.accept().map_err(|error| error.to_string())? {
             display
                 .handle()
@@ -539,8 +723,10 @@ fn run_compositor(
         match commands.try_recv() {
             Ok(CompositorCommand::Pulse {
                 expected_notifications,
+                event,
                 reply,
-            }) => pending_pulse = Some((expected_notifications, reply)),
+            }) => pending_pulse = Some((expected_notifications, event, reply)),
+            Ok(CompositorCommand::Created(reply)) => created_reply = Some(reply),
             Ok(CompositorCommand::Stop) => return Ok(()),
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => return Ok(()),
@@ -551,8 +737,8 @@ fn run_compositor(
             .map_err(|error| error.to_string())?;
         // wait for create/destroy requests so pause assertions observe the actual notification lifecycle
         let pulse_reply = match pending_pulse.take() {
-            Some((expected, reply)) if state.notifications.len() == expected => {
-                Some((reply, state.pulse()))
+            Some((expected, event, reply)) if state.notifications.len() == expected => {
+                Some((reply, state.emit(event)))
             }
             pending => {
                 pending_pulse = pending;
@@ -563,6 +749,9 @@ fn run_compositor(
         if let Some((reply, emitted)) = pulse_reply {
             let _ = reply.send(emitted);
         }
+        if let Some(reply) = created_reply {
+            let _ = reply.send(state.created);
+        }
         thread::sleep(Duration::from_millis(2));
     }
 }
@@ -570,16 +759,27 @@ fn run_compositor(
 #[derive(Default)]
 struct MockState {
     notifications: Vec<ExtIdleNotificationV1>,
+    created: usize,
 }
 
 impl MockState {
-    fn pulse(&mut self) -> usize {
+    fn emit(&mut self, event: MockEvent) -> usize {
         self.notifications.retain(Resource::is_alive);
-        for notification in &self.notifications {
-            notification.resumed();
-            notification.idled();
+        let mut emitted = 0;
+        for (index, notification) in self.notifications.iter().enumerate() {
+            match event {
+                MockEvent::Pulse => {
+                    notification.resumed();
+                    notification.idled();
+                }
+                MockEvent::Resume => notification.resumed(),
+                MockEvent::Idle => notification.idled(),
+                MockEvent::ResumeOne(selected) if index == selected => notification.resumed(),
+                MockEvent::ResumeOne(_) => continue,
+            }
+            emitted += 1;
         }
-        self.notifications.len()
+        emitted
     }
 }
 
@@ -639,6 +839,7 @@ impl Dispatch<ExtIdleNotifierV1, ()> for MockState {
         };
         let notification = data_init.init(id, ());
         notification.idled();
+        state.created += 1;
         state.notifications.push(notification);
     }
 }

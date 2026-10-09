@@ -24,9 +24,9 @@ use crate::{
     command::{FinishedCommand, ProcessCompletion, ProcessError, ProcessStart, SkipDecision},
     config::{Config, ConfigLoadError},
     control::ControlMonitor,
-    listener::ListenerSet,
+    listener::{ListenerError, ListenerSet},
     session::{DbusInhibitMonitor, LogindFeatures, LogindMonitor, SystemdIdleInhibitor},
-    wayland::{IdleWaylandError, IdleWaylandParts},
+    wayland::IdleWaylandParts,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +86,7 @@ pub enum RuntimeEvent {
 #[derive(Debug)]
 pub enum ConfigReloadOutcome {
     Applied,
-    Rejected(IdleWaylandError),
+    Rejected(RuntimeError),
     RestartRequired(&'static str),
 }
 
@@ -175,10 +175,15 @@ impl IdleRuntime {
             &listeners.timeout_requests(),
             candidate.idle_hint_timeout_seconds.map(Duration::from_secs),
         ) {
-            return Ok(ConfigReloadOutcome::Rejected(error));
+            return Ok(ConfigReloadOutcome::Rejected(error.into()));
         }
 
-        self.state.apply_config(candidate)?;
+        match self.state.apply_config(candidate) {
+            Err(error @ RuntimeError::Listener(ListenerError::TimedOutListenerChanged(_))) => {
+                return Ok(ConfigReloadOutcome::Rejected(error));
+            }
+            result => result?,
+        }
         self.flush_idle_hint_updates()?;
         Ok(ConfigReloadOutcome::Applied)
     }

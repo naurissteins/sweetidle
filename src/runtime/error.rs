@@ -134,6 +134,11 @@ impl fmt::Display for RuntimeError {
             Self::Listener(ListenerError::UnknownListener(listener_id)) => {
                 display_unknown_listener(formatter, *listener_id)
             }
+            Self::Listener(ListenerError::TimedOutListenerChanged(listener_id)) => write!(
+                formatter,
+                "cannot change or remove timed-out listener {}; retry reload after activity",
+                listener_id.index()
+            ),
             Self::Process(source) => write!(formatter, "command process failed: {source}"),
             Self::CommandDispatch(source) => {
                 write!(formatter, "command lifecycle state failed: {source}")
