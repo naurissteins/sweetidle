@@ -740,6 +740,39 @@ mod tests {
     }
 
     #[test]
+    fn equal_timeout_listeners_follow_wayland_event_order() {
+        let mut config = runtime_config();
+        config.listeners[1].timeout_seconds = config.listeners[0].timeout_seconds;
+        for (order, expected) in [
+            (
+                [0, 1],
+                vec![
+                    intent(0, CommandKind::Timeout, "lock"),
+                    intent(1, CommandKind::Timeout, "outputs off"),
+                ],
+            ),
+            (
+                [1, 0],
+                vec![
+                    intent(1, CommandKind::Timeout, "outputs off"),
+                    intent(0, CommandKind::Timeout, "lock"),
+                ],
+            ),
+        ] {
+            let mut state = runtime_state_from_config(&config);
+            for index in order {
+                state
+                    .wayland
+                    .record(IdleEvent::Idled(ListenerId::from_index(index)));
+            }
+
+            assert_runtime_ok(state.route_wayland_events());
+
+            assert_eq!(state.command_intents, expected);
+        }
+    }
+
+    #[test]
     fn applying_config_replaces_listener_policy() {
         let mut state = runtime_state();
         let config = Config {
@@ -1077,6 +1110,34 @@ mod tests {
                 active_systemd_inhibitors: 1,
             }] if *listener_id == ListenerId::from_index(0)
         ));
+    }
+
+    #[test]
+    fn same_count_systemd_snapshot_updates_status_without_resetting_notifications() {
+        let mut state = idle_hint_runtime_state();
+        state.record_session_event(SessionEvent::SystemdIdleInhibitorsChanged(vec![
+            systemd_inhibitor(20),
+        ]));
+        assert_runtime_ok(state.route_session_events());
+        let _ = state.take_runtime_events();
+        let queued = IdleEvent::Idled(ListenerId::from_index(0));
+        state.wayland.record(queued);
+        let replacement = vec![systemd_inhibitor(30)];
+        state.record_session_event(SessionEvent::SystemdIdleInhibitorsChanged(
+            replacement.clone(),
+        ));
+
+        assert_runtime_ok(state.route_session_events());
+
+        assert_eq!(state.status_snapshot().systemd_inhibitors, replacement);
+        assert_eq!(state.inhibition.systemd_count(), 1);
+        assert!(state.inhibition.inhibited());
+        assert_eq!(state.wayland.take_events(), vec![queued]);
+        assert!(state.command_intents.is_empty());
+        assert!(state.take_idle_hint_updates().is_empty());
+        assert!(matches!(state.take_runtime_events().as_slice(),
+            [RuntimeEvent::SystemdIdleInhibitorsChanged { inhibitors, active_count: 1 }]
+                if inhibitors == &replacement));
     }
 
     #[test]

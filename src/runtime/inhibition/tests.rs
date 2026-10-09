@@ -89,6 +89,13 @@ fn systemd_snapshots_replace_details_without_restarting_inhibition() {
         state.apply_systemd(systemd_snapshot(true)),
         Transition::Started
     );
+    let same_count_replacement = vec![systemd_inhibitor(20)];
+    assert_eq!(
+        state.apply_systemd(same_count_replacement.clone()),
+        Transition::Unchanged
+    );
+    assert_eq!(state.systemd_count(), 1);
+    assert_eq!(state.systemd_details(), same_count_replacement);
     let replacement = vec![systemd_inhibitor(20), systemd_inhibitor(30)];
     assert_eq!(
         state.apply_systemd(replacement.clone()),

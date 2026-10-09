@@ -146,6 +146,43 @@ mod tests {
     }
 
     #[test]
+    fn config_option_requires_a_path_for_both_spellings() {
+        for flag in ["--config", "-c"] {
+            assert_eq!(
+                parse_args([flag.to_string()]),
+                Err(format!("`{flag}` requires a path argument"))
+            );
+        }
+    }
+
+    #[test]
+    fn short_config_option_selects_daemon_startup() {
+        assert_eq!(
+            parse_args(["-c".to_string(), "idle.toml".to_string()]),
+            Ok(Action::Run {
+                path: Some(PathBuf::from("idle.toml")),
+                verbose: false,
+            })
+        );
+    }
+
+    #[test]
+    fn check_config_rejects_json_output() {
+        assert_eq!(
+            parse_args(["--check-config".to_string(), "--json".to_string()]),
+            Err("`--json` can only be used with `status`".to_string())
+        );
+    }
+
+    #[test]
+    fn repeated_status_command_is_rejected() {
+        assert_eq!(
+            parse_args(["status".to_string(), "status".to_string()]),
+            Err("only one control command may be specified".to_string())
+        );
+    }
+
+    #[test]
     fn verbose_enables_debug_logging_for_daemon_startup() {
         assert_eq!(
             parse_args(["--verbose".to_string()]),
