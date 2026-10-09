@@ -112,7 +112,27 @@ pub(super) fn diagnostic_text(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{InhibitorRegistry, InhibitorRegistryError, MAX_DIAGNOSTIC_CHARS};
+    use super::{InhibitorRegistry, InhibitorRegistryError, MAX_DIAGNOSTIC_CHARS, MAX_INHIBITORS};
+
+    #[test]
+    fn full_registry_rejects_additions_until_capacity_is_released() {
+        let mut registry = InhibitorRegistry::default();
+        let first = add(&mut registry, ":1.1", "video", "playing");
+        for _ in 1..MAX_INHIBITORS {
+            add(&mut registry, ":1.1", "video", "playing");
+        }
+        assert_eq!(registry.len(), MAX_INHIBITORS);
+
+        assert_eq!(
+            registry.add(":1.2", "overflow", "full"),
+            Err(InhibitorRegistryError::Full)
+        );
+        assert_eq!(registry.len(), MAX_INHIBITORS);
+
+        assert_eq!(registry.remove(first.cookie, ":1.1"), Ok(first));
+        assert!(registry.add(":1.2", "replacement", "available").is_ok());
+        assert_eq!(registry.len(), MAX_INHIBITORS);
+    }
 
     #[test]
     fn allocates_unique_nonzero_cookies() {
