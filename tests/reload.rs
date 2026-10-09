@@ -92,6 +92,30 @@ fn oversized_timeout_sighup_keeps_the_last_valid_config_active() -> Result<(), B
 
 #[test]
 #[ignore = "runs the real daemon against a private Wayland compositor"]
+fn oversized_config_sighup_keeps_the_last_valid_config_active() -> Result<(), Box<dyn Error>> {
+    let mut harness = ReloadHarness::start("active")?;
+    harness.wait_for_markers(1)?;
+
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&harness.config_path)?
+        .set_len(1024 * 1024 + 1)?;
+    harness.signal_reload()?;
+    harness.wait_for_log("1048576-byte limit (1 MiB)")?;
+    assert_eq!(harness.compositor.pulse(1)?, 1);
+    harness.wait_for_markers(2)?;
+
+    assert_eq!(harness.markers()?, ["active", "active"]);
+    harness.write_config("recovered")?;
+    harness.signal_reload()?;
+    harness.wait_for_markers(3)?;
+    assert_eq!(harness.markers()?, ["active", "active", "recovered"]);
+    harness.stop()?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "runs the real daemon against a private Wayland compositor"]
 fn unsupported_input_idle_sighup_keeps_the_last_valid_config_active() -> Result<(), Box<dyn Error>>
 {
     let mut harness = ReloadHarness::start_with_notifier_version("active", 1)?;

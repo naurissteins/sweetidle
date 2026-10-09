@@ -149,6 +149,10 @@ fn load_config(path: Option<PathBuf>) -> Result<LoadedConfig, String> {
 fn default_config_path() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME")
         .ok_or_else(|| "HOME is not set; pass --config <PATH>".to_string())?;
+    let home = PathBuf::from(home);
+    if !home.is_absolute() {
+        return Err("HOME must be absolute; pass --config <PATH>".to_string());
+    }
 
-    Ok(PathBuf::from(home).join(".config/sweetsidle/config.toml"))
+    Ok(home.join(".config/sweetsidle/config.toml"))
 }

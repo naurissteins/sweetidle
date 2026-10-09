@@ -108,6 +108,9 @@ Print the version and exit.
 The default configuration path is
 .IR ~/.config/sweetsidle/config.toml .
 The file uses TOML and rejects unknown fields.
+It must be UTF-8 and at most 1 MiB (1048576 bytes).
+Oversized files are rejected during startup, validation, and reload;
+a rejected reload keeps the last valid configuration active.
 Timeouts are integers from 1 through 4294967, measured in seconds.
 Configured command strings must not be empty and are executed through
 .BR "sh -c" .
@@ -253,6 +256,12 @@ restart and are not applied partially.
 .TP
 .B HOME
 Used to construct the default configuration path.
+For startup and config validation, it must be set to an absolute path when no
+.B \-\-config
+option is supplied.
+Empty or relative values are rejected.
+Explicit configuration paths do not depend on HOME and may be relative to the
+working directory.
 .TP
 .B XDG_RUNTIME_DIR
 Directory containing the owner-only control socket.
