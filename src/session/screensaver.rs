@@ -671,14 +671,13 @@ mod tests {
     }
 
     fn wait_for_event(events: &calloop::channel::Channel<DbusInhibitEvent>) -> DbusInhibitEvent {
-        for _ in 0..100 {
+        let deadline = crate::test_support::TestDeadline::new();
+        loop {
             match events.try_recv() {
                 Ok(event) => return event,
-                Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(10)),
+                Err(TryRecvError::Empty) => deadline.wait("D-Bus inhibitor event"),
                 Err(TryRecvError::Disconnected) => panic!("D-Bus inhibitor channel closed"),
             }
         }
-
-        panic!("timed out waiting for D-Bus inhibitor event")
     }
 }

@@ -65,7 +65,7 @@ fn invalid_sighup_keeps_the_last_valid_config_active() -> Result<(), Box<dyn Err
     fs::write(&harness.config_path, "[[listener]]\ntimeout = 0\n")?;
     harness.signal_reload()?;
     harness.wait_for_log("configuration reload rejected")?;
-    harness.compositor.pulse()?;
+    assert_eq!(harness.compositor.pulse(1)?, 1);
     harness.wait_for_markers(2)?;
 
     assert_eq!(harness.markers()?, ["active", "active"]);
@@ -82,7 +82,7 @@ fn oversized_timeout_sighup_keeps_the_last_valid_config_active() -> Result<(), B
     fs::write(&harness.config_path, "[[listener]]\ntimeout = 5000000\n")?;
     harness.signal_reload()?;
     harness.wait_for_log("configuration reload rejected")?;
-    harness.compositor.pulse()?;
+    assert_eq!(harness.compositor.pulse(1)?, 1);
     harness.wait_for_markers(2)?;
 
     assert_eq!(harness.markers()?, ["active", "active"]);
@@ -100,7 +100,7 @@ fn unsupported_input_idle_sighup_keeps_the_last_valid_config_active() -> Result<
     harness.write_config("rejected")?;
     harness.signal_reload()?;
     harness.wait_for_log("configuration reload rejected")?;
-    harness.compositor.pulse()?;
+    assert_eq!(harness.compositor.pulse(1)?, 1);
     harness.wait_for_markers(2)?;
 
     assert_eq!(harness.markers()?, ["active", "active"]);
@@ -154,8 +154,7 @@ fn pause_suppresses_idle_actions_until_resume() -> Result<(), Box<dyn Error>> {
     harness.wait_for_markers(1)?;
 
     assert_eq!(harness.control("pause")?, "sweetsidle: paused\n");
-    harness.compositor.pulse()?;
-    thread::sleep(Duration::from_millis(100));
+    assert_eq!(harness.compositor.pulse(0)?, 0);
     assert_eq!(harness.markers()?, ["controlled"]);
     assert!(harness.status()?.contains("sweetsidle: paused"));
     assert_eq!(harness.control("pause")?, "sweetsidle: already paused\n");
@@ -433,7 +432,10 @@ impl Drop for TestDaemon {
 }
 
 enum CompositorCommand {
-    Pulse,
+    Pulse {
+        expected_notifications: usize,
+        reply: Sender<usize>,
+    },
     Stop,
 }
 
@@ -463,9 +465,13 @@ impl MockCompositor {
         })
     }
 
-    fn pulse(&self) -> Result<(), Box<dyn Error>> {
-        self.commands.send(CompositorCommand::Pulse)?;
-        Ok(())
+    fn pulse(&self, expected_notifications: usize) -> Result<usize, Box<dyn Error>> {
+        let (reply, received) = mpsc::channel();
+        self.commands.send(CompositorCommand::Pulse {
+            expected_notifications,
+            reply,
+        })?;
+        received.recv_timeout(WAIT_LIMIT).map_err(Into::into)
     }
 
     fn stop(&mut self) -> Result<(), Box<dyn Error>> {
@@ -497,6 +503,7 @@ fn run_compositor(
     commands: &Receiver<CompositorCommand>,
 ) -> Result<(), String> {
     let mut state = MockState::default();
+    let mut pending_pulse = None;
     loop {
         while let Some(stream) = socket.accept().map_err(|error| error.to_string())? {
             display
@@ -506,7 +513,10 @@ fn run_compositor(
         }
 
         match commands.try_recv() {
-            Ok(CompositorCommand::Pulse) => state.pulse(),
+            Ok(CompositorCommand::Pulse {
+                expected_notifications,
+                reply,
+            }) => pending_pulse = Some((expected_notifications, reply)),
             Ok(CompositorCommand::Stop) => return Ok(()),
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => return Ok(()),
@@ -515,7 +525,20 @@ fn run_compositor(
         display
             .dispatch_clients(&mut state)
             .map_err(|error| error.to_string())?;
+        // wait for create/destroy requests so pause assertions observe the actual notification lifecycle
+        let pulse_reply = match pending_pulse.take() {
+            Some((expected, reply)) if state.notifications.len() == expected => {
+                Some((reply, state.pulse()))
+            }
+            pending => {
+                pending_pulse = pending;
+                None
+            }
+        };
         display.flush_clients().map_err(|error| error.to_string())?;
+        if let Some((reply, emitted)) = pulse_reply {
+            let _ = reply.send(emitted);
+        }
         thread::sleep(Duration::from_millis(2));
     }
 }
@@ -526,12 +549,13 @@ struct MockState {
 }
 
 impl MockState {
-    fn pulse(&mut self) {
+    fn pulse(&mut self) -> usize {
         self.notifications.retain(Resource::is_alive);
         for notification in &self.notifications {
             notification.resumed();
             notification.idled();
         }
+        self.notifications.len()
     }
 }
 

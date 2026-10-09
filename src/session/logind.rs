@@ -433,7 +433,9 @@ mod tests {
         events: &calloop::channel::Channel<SessionEvent>,
         expected_active: bool,
     ) {
-        for _ in 0..100 {
+        let deadline = crate::test_support::TestDeadline::new();
+        let waiting_for = format!("systemd idle inhibitor state {expected_active}");
+        loop {
             match events.try_recv() {
                 Ok(SessionEvent::SystemdIdleInhibitorsChanged(inhibitors))
                     if inhibitors
@@ -444,11 +446,9 @@ mod tests {
                     return;
                 }
                 Ok(SessionEvent::Failed(error)) => panic!("logind monitor failed: {error}"),
-                Ok(_) | Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(10)),
+                Ok(_) | Err(TryRecvError::Empty) => deadline.wait(&waiting_for),
                 Err(TryRecvError::Disconnected) => panic!("logind event channel closed"),
             }
         }
-
-        panic!("timed out waiting for systemd idle inhibitor state {expected_active}");
     }
 }

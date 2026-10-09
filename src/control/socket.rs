@@ -390,6 +390,7 @@ mod tests {
         ControlError, ControlEvent, ControlMonitor, PAUSE_COMMAND, STATUS_COMMAND,
         STATUS_JSON_COMMAND, StatusFormat, runtime_socket_path, send_command_at,
     };
+    use crate::test_support::TestDeadline;
 
     #[test]
     fn request_above_64_bytes_is_rejected() -> Result<(), Box<dyn Error>> {
@@ -496,6 +497,16 @@ mod tests {
         let abandoned = UnixListener::bind(&path)?;
         drop(abandoned);
         assert!(path.exists());
+        // concurrent forks can retain the listener until exec, so first establish that it is stale
+        let deadline = TestDeadline::new();
+        loop {
+            match UnixStream::connect(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => break,
+                Ok(stream) => drop(stream),
+                Err(error) => return Err(error.into()),
+            }
+            deadline.wait("abandoned listener FD release");
+        }
 
         let (monitor, events) = ControlMonitor::connect_at(path.clone())?;
         let client_path = path.clone();

@@ -7,4 +7,7 @@ pub mod runtime;
 mod session;
 mod wayland;
 
+#[cfg(test)]
+mod test_support;
+
 pub use command::ProcessError;
