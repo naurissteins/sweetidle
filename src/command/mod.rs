@@ -69,6 +69,7 @@ pub struct CommandDispatcher {
 }
 
 impl CommandDispatcher {
+    #[must_use = "the dispatch decision must be handled to spawn or report the command"]
     pub fn dispatch(&mut self, intent: CommandIntent) -> DispatchDecision {
         self.dispatch_command(
             CommandContext::Listener {
@@ -79,6 +80,7 @@ impl CommandDispatcher {
         )
     }
 
+    #[must_use = "the dispatch decision must be handled to spawn or report the command"]
     pub fn dispatch_command(
         &mut self,
         context: CommandContext,

@@ -138,6 +138,7 @@ impl ListenerSet {
         }))
     }
 
+    #[must_use = "returned resume intents must be dispatched"]
     pub fn mark_active_respecting_inhibitors(&mut self) -> Vec<CommandIntent> {
         self.mark_active_matching(|listener| listener.inhibit_policy == InhibitPolicy::Respect)
     }
