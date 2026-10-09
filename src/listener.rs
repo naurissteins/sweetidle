@@ -52,6 +52,13 @@ pub enum CommandKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListenerError {
     UnknownListener(ListenerId),
+    TimedOutListenerChanged(ListenerId),
+}
+
+pub(crate) struct ListenerReload {
+    pub(crate) listeners: ListenerSet,
+    pub(crate) matching_ids: Vec<Option<ListenerId>>,
+    pub(crate) retained_ids: Vec<(ListenerId, ListenerId)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,10 +178,13 @@ impl ListenerSet {
 
     pub(crate) fn matching_listener_ids(&self, candidate: &Self) -> Vec<Option<ListenerId>> {
         let mut matched = vec![false; candidate.listeners.len()];
-        self.listeners
-            .iter()
-            .map(|listener| {
-                // match duplicate definitions in config order without comparing idle phase
+        let mut matching = vec![None; self.listeners.len()];
+        // timed-out duplicates get first claim so removing an armed copy cannot discard their cycle
+        for phase in [ListenerPhase::TimedOut, ListenerPhase::Armed] {
+            for (old_index, listener) in self.listeners.iter().enumerate() {
+                if listener.phase != phase {
+                    continue;
+                }
                 let index = candidate
                     .listeners
                     .iter()
@@ -185,9 +195,29 @@ impl ListenerSet {
                 if let Some(index) = index {
                     matched[index] = true;
                 }
-                index.map(ListenerId)
-            })
-            .collect()
+                matching[old_index] = index.map(ListenerId);
+            }
+        }
+        matching
+    }
+
+    pub(crate) fn prepare_reload(&self, config: &Config) -> Result<ListenerReload, ListenerError> {
+        let mut listeners = Self::from_config(config);
+        let matching_ids = self.matching_listener_ids(&listeners);
+        let mut retained_ids = Vec::new();
+        for (index, (old, next)) in self.listeners.iter().zip(&matching_ids).enumerate() {
+            if old.phase != ListenerPhase::TimedOut {
+                continue;
+            }
+            let next = next.ok_or(ListenerError::TimedOutListenerChanged(ListenerId(index)))?;
+            listeners.listeners[next.index()].phase = ListenerPhase::TimedOut;
+            retained_ids.push((ListenerId(index), next));
+        }
+        Ok(ListenerReload {
+            listeners,
+            matching_ids,
+            retained_ids,
+        })
     }
 
     fn mark_active_matching(
@@ -450,5 +480,95 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn reload_retains_a_timed_out_listener_until_its_own_resume() {
+        let mut config = sample_config();
+        config.listeners[0].on_resume = Some("resume".into());
+        let mut active = ListenerSet::from_config(&config);
+        assert!(active.mark_timed_out(ListenerId(0)).is_ok());
+        let mut reload = match active.prepare_reload(&config) {
+            Ok(reload) => reload,
+            Err(error) => panic!("reload rejected: {error:?}"),
+        };
+
+        assert_eq!(reload.retained_ids, [(ListenerId(0), ListenerId(0))]);
+        assert_eq!(reload.listeners.mark_timed_out(ListenerId(0)), Ok(None));
+        assert!(matches!(
+            reload.listeners.mark_resumed(ListenerId(0)),
+            Ok(Some(_))
+        ));
+        assert_eq!(reload.listeners.mark_resumed(ListenerId(0)), Ok(None));
+    }
+
+    #[test]
+    fn reload_rejects_every_definition_change_to_a_timed_out_listener() {
+        let config = sample_config();
+        let mut active = ListenerSet::from_config(&config);
+        assert!(active.mark_timed_out(ListenerId(0)).is_ok());
+        for change in 0..4 {
+            let mut candidate = config.clone();
+            match change {
+                0 => candidate.listeners[0].timeout_seconds += 1,
+                1 => candidate.listeners[0].on_timeout = Some("changed timeout".into()),
+                2 => candidate.listeners[0].on_resume = Some("changed resume".into()),
+                _ => candidate.listeners[0].ignore_inhibit = !candidate.listeners[0].ignore_inhibit,
+            }
+            assert!(matches!(
+                active.prepare_reload(&candidate),
+                Err(super::ListenerError::TimedOutListenerChanged(ListenerId(0)))
+            ));
+        }
+        assert_eq!(active.status()[0].phase, super::ListenerPhase::TimedOut);
+    }
+
+    #[test]
+    fn reload_rejects_removal_of_a_timed_out_listener_without_commands() {
+        let mut config =
+            Config::parse("[[listener]]\ntimeout = 30\n").unwrap_or_else(|e| panic!("{e}"));
+        let mut active = ListenerSet::from_config(&config);
+        assert_eq!(active.mark_timed_out(ListenerId(0)), Ok(None));
+        config.listeners.clear();
+
+        assert!(matches!(
+            active.prepare_reload(&config),
+            Err(super::ListenerError::TimedOutListenerChanged(ListenerId(0)))
+        ));
+    }
+
+    #[test]
+    fn reload_matches_timed_out_duplicates_before_armed_copies() {
+        let mut config = sample_config();
+        config.listeners = vec![config.listeners[0].clone(); 2];
+        let mut active = ListenerSet::from_config(&config);
+        assert!(active.mark_timed_out(ListenerId(1)).is_ok());
+        config.listeners.pop();
+        let reload = match active.prepare_reload(&config) {
+            Ok(reload) => reload,
+            Err(error) => panic!("reload rejected: {error:?}"),
+        };
+
+        assert_eq!(reload.matching_ids, [None, Some(ListenerId(0))]);
+        assert_eq!(reload.retained_ids, [(ListenerId(1), ListenerId(0))]);
+        assert_eq!(
+            reload.listeners.status()[0].phase,
+            super::ListenerPhase::TimedOut
+        );
+    }
+
+    #[test]
+    fn reload_requires_a_copy_for_every_timed_out_duplicate() {
+        let mut config = sample_config();
+        config.listeners = vec![config.listeners[0].clone(); 2];
+        let mut active = ListenerSet::from_config(&config);
+        assert!(active.mark_timed_out(ListenerId(0)).is_ok());
+        assert!(active.mark_timed_out(ListenerId(1)).is_ok());
+        config.listeners.pop();
+
+        assert!(matches!(
+            active.prepare_reload(&config),
+            Err(ListenerError::TimedOutListenerChanged(ListenerId(1)))
+        ));
     }
 }
