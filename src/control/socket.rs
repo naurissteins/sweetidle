@@ -371,21 +371,170 @@ impl fmt::Display for ClientRequestError {
 #[cfg(test)]
 mod tests {
     use std::{
+        error::Error,
+        ffi::OsString,
         fs,
-        io::Read,
+        io::{Read, Write},
         os::unix::{
             fs::PermissionsExt,
             net::{UnixListener, UnixStream},
         },
+        path::Path,
         thread,
+        time::{Duration, Instant},
     };
 
     use tempfile::TempDir;
 
     use super::{
         ControlError, ControlEvent, ControlMonitor, PAUSE_COMMAND, STATUS_COMMAND,
-        STATUS_JSON_COMMAND, StatusFormat, send_command_at,
+        STATUS_JSON_COMMAND, StatusFormat, runtime_socket_path, send_command_at,
     };
+
+    #[test]
+    fn request_above_64_bytes_is_rejected() -> Result<(), Box<dyn Error>> {
+        let temp = TempDir::new()?;
+        let path = temp.path().join("control.sock");
+        let (_monitor, events) = ControlMonitor::connect_at(path.clone())?;
+
+        let result = send_command_at(&path, &[b'x'; 65]);
+
+        assert!(matches!(result, Err(ControlError::ServerRejected(message))
+            if message == "control request is too large"));
+        assert!(matches!(
+            events.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn request_at_64_bytes_reaches_command_validation() -> Result<(), Box<dyn Error>> {
+        let temp = TempDir::new()?;
+        let path = temp.path().join("control.sock");
+        let (_monitor, events) = ControlMonitor::connect_at(path.clone())?;
+
+        let result = send_command_at(&path, &[b'x'; 64]);
+
+        assert!(matches!(result, Err(ControlError::ServerRejected(message))
+            if message == "unknown control command"));
+        assert!(matches!(
+            events.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn empty_request_is_rejected() -> Result<(), Box<dyn Error>> {
+        let temp = TempDir::new()?;
+        let path = temp.path().join("control.sock");
+        let (_monitor, events) = ControlMonitor::connect_at(path.clone())?;
+
+        let result = send_command_at(&path, b"");
+
+        assert!(matches!(result, Err(ControlError::ServerRejected(message))
+            if message == "unknown control command"));
+        assert!(matches!(
+            events.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn known_command_without_trailing_newline_is_rejected() -> Result<(), Box<dyn Error>> {
+        let temp = TempDir::new()?;
+        let path = temp.path().join("control.sock");
+        let (_monitor, events) = ControlMonitor::connect_at(path.clone())?;
+
+        let result = send_command_at(&path, b"status");
+
+        assert!(matches!(result, Err(ControlError::ServerRejected(message))
+            if message == "unknown control command"));
+        assert!(matches!(
+            events.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn unanswered_runtime_request_times_out_without_stopping_the_worker()
+    -> Result<(), Box<dyn Error>> {
+        let temp = TempDir::new()?;
+        let path = temp.path().join("control.sock");
+        let (_monitor, events) = ControlMonitor::connect_at(path.clone())?;
+        let mut stream = UnixStream::connect(&path)?;
+        // outlast the server's reply deadline instead of racing the normal client's equal timeout
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        let started = Instant::now();
+        stream.write_all(STATUS_COMMAND)?;
+        stream.shutdown(std::net::Shutdown::Write)?;
+
+        // keep the reply sender alive in the event queue until the server times out
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+
+        assert_eq!(response, "error: daemon did not answer in time\n");
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        let ControlEvent::Status { request, format } = events.try_recv()? else {
+            panic!("expected the unanswered status request");
+        };
+        assert_eq!(format, StatusFormat::Text);
+        request.respond("late response\n".to_string());
+        assert!(matches!(send_command_at(&path, b""),
+            Err(ControlError::ServerRejected(message)) if message == "unknown control command"));
+        Ok(())
+    }
+
+    #[test]
+    fn abandoned_socket_is_replaced_by_a_working_monitor() -> Result<(), Box<dyn Error>> {
+        let temp = TempDir::new()?;
+        let path = temp.path().join("control.sock");
+        let abandoned = UnixListener::bind(&path)?;
+        drop(abandoned);
+        assert!(path.exists());
+
+        let (monitor, events) = ControlMonitor::connect_at(path.clone())?;
+        let client_path = path.clone();
+        let client = thread::spawn(move || send_command_at(&client_path, STATUS_COMMAND));
+        let ControlEvent::Status { request, format } = events.recv()? else {
+            panic!("expected a status request after stale socket recovery");
+        };
+        assert_eq!(format, StatusFormat::Text);
+        request.respond("recovered\n".to_string());
+
+        assert_eq!(
+            client
+                .join()
+                .unwrap_or_else(|_| panic!("client panicked"))?,
+            "recovered\n"
+        );
+        drop(monitor);
+        assert!(!path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn regular_file_at_socket_path_is_rejected_and_preserved() -> Result<(), Box<dyn Error>> {
+        let temp = TempDir::new()?;
+        let path = temp.path().join("control.sock");
+        fs::write(&path, b"keep this file")?;
+
+        let result = ControlMonitor::connect_at(path.clone());
+
+        assert!(matches!(result, Err(ControlError::PathOccupied(found)) if found == path));
+        assert_eq!(fs::read(&path)?, b"keep this file");
+        Ok(())
+    }
+
+    #[test]
+    fn relative_runtime_directory_is_rejected() {
+        assert!(matches!(runtime_socket_path(OsString::from("relative")),
+            Err(ControlError::RelativeRuntimeDirectory(found)) if found.as_path() == Path::new("relative")));
+    }
 
     #[test]
     fn status_request_round_trips_through_the_worker() {
