@@ -76,7 +76,7 @@ impl Manager {
     }
 
     fn inhibit(&self, what: &str, who: &str, _why: &str, mode: &str) -> fdo::Result<OwnedFd> {
-        assert_eq!((what, who, mode), ("sleep", "sweetsidle", "delay"));
+        assert_eq!((what, who, mode), ("sleep", "sweetidle", "delay"));
         let mut state = state(&self.0);
         state.calls.push("delay");
         if state.fail_inhibit {

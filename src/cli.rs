@@ -50,7 +50,7 @@ pub(super) fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Actio
                     .ok_or_else(|| format!("`{arg}` requires a path argument"))?;
                 config_path = Some(PathBuf::from(path));
             }
-            _ => return Err(format!("unknown argument `{arg}`\ntry `sweetsidle --help`")),
+            _ => return Err(format!("unknown argument `{arg}`\ntry `sweetidle --help`")),
         }
     }
 
@@ -95,10 +95,10 @@ fn set_control_action(current: &mut Option<Action>, action: Action) -> Result<()
 pub(super) fn print_help() {
     println!(
         "\
-sweetsidle {VERSION}
+sweetidle {VERSION}
 
-Usage: sweetsidle [OPTIONS]
-       sweetsidle <COMMAND>
+Usage: sweetidle [OPTIONS]
+       sweetidle <COMMAND>
 
 Commands:
   status [--json]     Show listener and inhibitor state

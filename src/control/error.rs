@@ -37,7 +37,7 @@ impl fmt::Display for ControlError {
             ),
             Self::AlreadyRunning(path) => write!(
                 formatter,
-                "another sweetsidle instance is listening at `{}`",
+                "another sweetidle instance is listening at `{}`",
                 path.display()
             ),
             Self::PathOccupied(path) => write!(
@@ -85,7 +85,7 @@ impl fmt::Display for ControlError {
             Self::Accept { source } => write!(formatter, "control socket accept failed: {source}"),
             Self::Connect { path, source } => write!(
                 formatter,
-                "failed to connect to sweetsidle at `{}`: {source}",
+                "failed to connect to sweetidle at `{}`: {source}",
                 path.display()
             ),
             Self::ConfigureClient { source } => {

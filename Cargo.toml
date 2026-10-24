@@ -1,10 +1,10 @@
 [package]
-name = "sweetsidle"
+name = "sweetidle"
 version = "0.1.0"
 edition = "2024"
 authors = ["Nauris Steins"]
 license = "GPL-3.0-or-later"
-repository = "https://github.com/naurissteins/sweetsidle"
+repository = "https://github.com/naurissteins/sweetidle"
 description = "Recommended idle management daemon for the Sweets compositor"
 
 [dependencies]

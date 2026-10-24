@@ -170,7 +170,7 @@ fn control_reload_applies_valid_config_without_restarting_the_daemon() -> Result
 
     harness.resume_listener_cycle()?;
     harness.write_config("reloaded")?;
-    assert_eq!(harness.control("reload")?, "sweetsidle: reload requested\n");
+    assert_eq!(harness.control("reload")?, "sweetidle: reload requested\n");
     harness.wait_for_markers(2)?;
 
     assert_eq!(harness.markers()?, ["initial", "reloaded"]);
@@ -265,7 +265,7 @@ fn status_reports_live_listener_state() -> Result<(), Box<dyn Error>> {
 
     let status = harness.status()?;
 
-    assert!(status.contains("sweetsidle: running"));
+    assert!(status.contains("sweetidle: running"));
     assert!(status.contains("id=0 state=timed-out timeout=3600s inhibitors=ignored"));
     assert!(status.contains("tracked inhibitors: none"));
     harness.stop()?;
@@ -300,16 +300,16 @@ fn pause_suppresses_idle_actions_until_resume() -> Result<(), Box<dyn Error>> {
     let mut harness = ReloadHarness::start("controlled")?;
     harness.wait_for_markers(1)?;
 
-    assert_eq!(harness.control("pause")?, "sweetsidle: paused\n");
+    assert_eq!(harness.control("pause")?, "sweetidle: paused\n");
     assert_eq!(harness.compositor.pulse(0)?, 0);
     assert_eq!(harness.markers()?, ["controlled"]);
-    assert!(harness.status()?.contains("sweetsidle: paused"));
-    assert_eq!(harness.control("pause")?, "sweetsidle: already paused\n");
+    assert!(harness.status()?.contains("sweetidle: paused"));
+    assert_eq!(harness.control("pause")?, "sweetidle: already paused\n");
 
-    assert_eq!(harness.control("resume")?, "sweetsidle: resumed\n");
+    assert_eq!(harness.control("resume")?, "sweetidle: resumed\n");
     harness.wait_for_markers(2)?;
-    assert!(harness.status()?.contains("sweetsidle: running"));
-    assert_eq!(harness.control("resume")?, "sweetsidle: already running\n");
+    assert!(harness.status()?.contains("sweetidle: running"));
+    assert_eq!(harness.control("resume")?, "sweetidle: already running\n");
     harness.stop()?;
     Ok(())
 }
@@ -390,7 +390,7 @@ impl ReloadHarness {
 
         let log = File::create(&log_path)?;
         let log_stdout = log.try_clone()?;
-        let child = Command::new(env!("CARGO_BIN_EXE_sweetsidle"))
+        let child = Command::new(env!("CARGO_BIN_EXE_sweetidle"))
             .args(["--config", path_text(&config_path)?])
             .env("WAYLAND_DISPLAY", &socket_path)
             .env("XDG_RUNTIME_DIR", temp_dir.path())
@@ -468,7 +468,7 @@ impl ReloadHarness {
     }
 
     fn control_args(&mut self, args: &[&str]) -> Result<String, Box<dyn Error>> {
-        let output = Command::new(env!("CARGO_BIN_EXE_sweetsidle"))
+        let output = Command::new(env!("CARGO_BIN_EXE_sweetidle"))
             .args(args)
             .env("XDG_RUNTIME_DIR", self.temp_dir.path())
             .output()?;
@@ -552,13 +552,13 @@ fn wait_until(
         }
         if let Some(status) = daemon.try_wait()? {
             let log = fs::read_to_string(log_path).unwrap_or_default();
-            return Err(format!("sweetsidle exited early with {status}:\n{log}").into());
+            return Err(format!("sweetidle exited early with {status}:\n{log}").into());
         }
         thread::sleep(Duration::from_millis(10));
     }
 
     let log = fs::read_to_string(log_path).unwrap_or_default();
-    Err(format!("timed out waiting for sweetsidle:\n{log}").into())
+    Err(format!("timed out waiting for sweetidle:\n{log}").into())
 }
 
 struct TestDaemon {
@@ -574,7 +574,7 @@ impl TestDaemon {
         let child = self
             .child
             .as_ref()
-            .ok_or("sweetsidle process is no longer running")?;
+            .ok_or("sweetidle process is no longer running")?;
         kill_process(Pid::from_child(child), signal)?;
         Ok(())
     }
@@ -582,7 +582,7 @@ impl TestDaemon {
     fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>, Box<dyn Error>> {
         self.child
             .as_mut()
-            .ok_or_else(|| "sweetsidle process is no longer running".into())
+            .ok_or_else(|| "sweetidle process is no longer running".into())
             .and_then(|child| child.try_wait().map_err(Into::into))
     }
 
@@ -595,10 +595,10 @@ impl TestDaemon {
         let child = self
             .child
             .take()
-            .ok_or("sweetsidle process is no longer running")?;
+            .ok_or("sweetidle process is no longer running")?;
         let status = child.wait_with_output()?.status;
         if !status.success() {
-            return Err(format!("sweetsidle stopped with {status}").into());
+            return Err(format!("sweetidle stopped with {status}").into());
         }
         Ok(())
     }
@@ -648,7 +648,7 @@ impl MockCompositor {
         handle.create_global::<MockState, ExtIdleNotifierV1, _>(notifier_version, ());
         let (commands, receiver) = mpsc::channel();
         let thread = thread::Builder::new()
-            .name("sweetsidle-test-wayland".to_string())
+            .name("sweetidle-test-wayland".to_string())
             .spawn(move || run_compositor(&mut display, &socket, &receiver))?;
 
         Ok(Self {

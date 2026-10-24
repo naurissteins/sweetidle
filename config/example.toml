@@ -1,5 +1,5 @@
-# sweetsidle configuration
-# Place this file at ~/.config/sweetsidle/config.toml.
+# sweetidle configuration
+# Place this file at ~/.config/sweetidle/config.toml.
 
 [general]
 lock_command = "sweetslock"

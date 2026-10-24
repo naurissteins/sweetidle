@@ -1,4 +1,4 @@
-use sweetsidle::{
+use sweetidle::{
     ProcessError,
     config::Config,
     runtime::{InhibitorChange, RuntimeEvent},
@@ -181,7 +181,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use sweetsidle::{
+    use sweetidle::{
         config::{Config, ConfigLoadError},
         runtime::ShutdownSignal,
     };

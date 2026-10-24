@@ -30,8 +30,8 @@ fn spawn_waits_for_readiness_and_drop_joins_cleanup() {
     let cleaned = Arc::new(AtomicBool::new(false));
     let worker_cleaned = Arc::clone(&cleaned);
     let caller = thread::spawn(move || {
-        let worker = Worker::spawn::<TestError>("sweetsidle-test", move |ready, shutdown| {
-            assert_eq!(thread::current().name(), Some("sweetsidle-test"));
+        let worker = Worker::spawn::<TestError>("sweetidle-test", move |ready, shutdown| {
+            assert_eq!(thread::current().name(), Some("sweetidle-test"));
             entered.send(()).unwrap_or_else(|error| panic!("{error}"));
             gate.recv().unwrap_or_else(|error| panic!("{error}"));
             ready.send(Ok(())).unwrap_or_else(|error| panic!("{error}"));
@@ -63,7 +63,7 @@ fn spawn_waits_for_readiness_and_drop_joins_cleanup() {
 fn startup_error_is_returned_after_worker_cleanup() {
     let cleaned = Arc::new(AtomicBool::new(false));
     let worker_cleaned = Arc::clone(&cleaned);
-    let result = Worker::spawn("sweetsidle-test", move |ready, _shutdown| {
+    let result = Worker::spawn("sweetidle-test", move |ready, _shutdown| {
         let result: Result<(), TestError> = report_initialization_error(&ready, TestError::Startup);
         assert!(matches!(
             result,
@@ -79,7 +79,7 @@ fn startup_error_is_returned_after_worker_cleanup() {
 fn missing_readiness_is_returned_after_worker_cleanup() {
     let cleaned = Arc::new(AtomicBool::new(false));
     let worker_cleaned = Arc::clone(&cleaned);
-    let result = Worker::spawn::<TestError>("sweetsidle-test", move |ready, _shutdown| {
+    let result = Worker::spawn::<TestError>("sweetidle-test", move |ready, _shutdown| {
         drop(ready);
         worker_cleaned.store(true, Ordering::SeqCst);
     });
@@ -94,7 +94,7 @@ fn missing_readiness_is_returned_after_worker_cleanup() {
 fn explicit_shutdown_then_drop_sends_once_and_joins() {
     let cleaned = Arc::new(AtomicBool::new(false));
     let worker_cleaned = Arc::clone(&cleaned);
-    let mut worker = Worker::spawn::<TestError>("sweetsidle-test", move |ready, shutdown| {
+    let mut worker = Worker::spawn::<TestError>("sweetidle-test", move |ready, shutdown| {
         ready.send(Ok(())).unwrap_or_else(|error| panic!("{error}"));
         shutdown
             .recv_blocking()

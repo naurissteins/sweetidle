@@ -76,7 +76,7 @@ impl LogindMonitor {
     ) -> Result<(Self, Channel<SessionEvent>), SessionError> {
         let (event_sender, event_channel) = channel();
         let (request_sender, request_receiver) = unbounded();
-        let worker = Worker::spawn("sweetsidle-logind", move |ready, shutdown| {
+        let worker = Worker::spawn("sweetidle-logind", move |ready, shutdown| {
             run_worker(features, event_sender, ready, request_receiver, shutdown);
         })?;
 
@@ -267,7 +267,7 @@ mod tests {
         let (requests, receiver) = async_channel::unbounded::<super::SessionRequest>();
         let (finished, completed) = std::sync::mpsc::channel();
         let worker =
-            Worker::spawn::<SessionError>("sweetsidle-test-logind", move |ready, shutdown| {
+            Worker::spawn::<SessionError>("sweetidle-test-logind", move |ready, shutdown| {
                 ready.send(Ok(())).unwrap_or_else(|error| panic!("{error}"));
                 async_io::block_on(futures_lite::future::race(
                     async {
@@ -412,7 +412,7 @@ mod tests {
             match proxy
                 .inhibit(
                     "idle",
-                    "sweetsidle integration test",
+                    "sweetidle integration test",
                     "verify idle inhibitor monitoring",
                     "block",
                 )
@@ -440,7 +440,7 @@ mod tests {
                 Ok(SessionEvent::SystemdIdleInhibitorsChanged(inhibitors))
                     if inhibitors
                         .iter()
-                        .any(|inhibitor| inhibitor.who == "sweetsidle integration test")
+                        .any(|inhibitor| inhibitor.who == "sweetidle integration test")
                         == expected_active =>
                 {
                     return;

@@ -18,7 +18,7 @@ use rustix::event::{PollFd, PollFlags, poll};
 
 use super::{ControlError, ControlEvent, ControlRequest, StatusFormat};
 
-const SOCKET_NAME: &str = "sweetsidle.sock";
+const SOCKET_NAME: &str = "sweetidle.sock";
 const STATUS_COMMAND: &[u8] = b"status\n";
 const STATUS_JSON_COMMAND: &[u8] = b"status-json\n";
 const PAUSE_COMMAND: &[u8] = b"pause\n";
@@ -45,7 +45,7 @@ impl ControlMonitor {
             UnixStream::pair().map_err(|source| ControlError::CreateShutdownChannel { source })?;
         let (event_sender, event_channel) = channel();
         let thread = thread::Builder::new()
-            .name("sweetsidle-control".to_string())
+            .name("sweetidle-control".to_string())
             .spawn(move || run_worker(listener, socket_file, event_sender, worker_shutdown))
             .map_err(|source| ControlError::SpawnWorker {
                 path: socket_path.clone(),
@@ -673,7 +673,7 @@ mod tests {
             .recv()
             .unwrap_or_else(|error| panic!("control event missing: {error}"));
         match event {
-            ControlEvent::Pause(request) => request.respond("sweetsidle: paused\n".to_string()),
+            ControlEvent::Pause(request) => request.respond("sweetidle: paused\n".to_string()),
             ControlEvent::Status { .. } | ControlEvent::Resume(_) | ControlEvent::Reload(_) => {
                 panic!("unexpected control command")
             }
@@ -684,7 +684,7 @@ mod tests {
             .join()
             .unwrap_or_else(|_| panic!("control client panicked"))
             .unwrap_or_else(|error| panic!("pause request failed: {error}"));
-        assert_eq!(response, "sweetsidle: paused\n");
+        assert_eq!(response, "sweetidle: paused\n");
         drop(monitor);
     }
 

@@ -1,25 +1,25 @@
-.TH SWEETSIDLE 1 "September 2026" "sweetsidle 0.1.0" "User Commands"
+.TH SWEETIDLE 1 "September 2026" "sweetidle 0.1.0" "User Commands"
 .SH NAME
-sweetsidle \- Wayland idle management daemon for the Sweets compositor
+sweetidle \- Wayland idle management daemon for the Sweets compositor
 .SH SYNOPSIS
-.B sweetsidle
+.B sweetidle
 .RI [ OPTIONS ]
 .br
-.B sweetsidle status
+.B sweetidle status
 .RB [ \-\-json ]
 .br
-.B sweetsidle pause
+.B sweetidle pause
 .br
-.B sweetsidle resume
+.B sweetidle resume
 .br
-.B sweetsidle reload
+.B sweetidle reload
 .br
-.B sweetsidle
+.B sweetidle
 .RB [ \-c | \-\-config
 .IR PATH ]
 .B \-\-check-config
 .SH DESCRIPTION
-.B sweetsidle
+.B sweetidle
 is a lightweight Wayland idle daemon for the Sweets compositor.
 It uses
 .B ext-idle-notify-v1
@@ -80,7 +80,7 @@ Print command-line help and exit.
 Print the version and exit.
 .SH CONFIGURATION
 The default configuration path is
-.IR ~/.config/sweetsidle/config.toml .
+.IR ~/.config/sweetidle/config.toml .
 The file is UTF-8 TOML, at most 1 MiB, and unknown fields are rejected.
 Timeouts are seconds from 1 to 4294967.
 Commands must not be empty and run through
@@ -178,7 +178,7 @@ lists D-Bus and systemd inhibitors; compositor inhibitors are not visible to
 clients.
 .SH CONTROL SOCKET
 Control commands talk to
-.I $XDG_RUNTIME_DIR/sweetsidle.sock
+.I $XDG_RUNTIME_DIR/sweetidle.sock
 (mode 0600).
 A live socket prevents a second daemon from starting.
 .SH SIGNALS
@@ -210,55 +210,55 @@ Logind session to use.
 If unset, the session is looked up by process ID.
 .SH FILES
 .TP
-.I ~/.config/sweetsidle/config.toml
+.I ~/.config/sweetidle/config.toml
 Default user configuration.
 .TP
-.I $XDG_RUNTIME_DIR/sweetsidle.sock
+.I $XDG_RUNTIME_DIR/sweetidle.sock
 Local control socket.
 .TP
-.I /usr/lib/systemd/user/sweetsidle.service
+.I /usr/lib/systemd/user/sweetidle.service
 Systemd user service.
 .TP
-.I /usr/share/man/man1/sweetsidle.1
+.I /usr/share/man/man1/sweetidle.1
 This manual page.
 .SH SYSTEMD USER SERVICE
 The supplied
-.B sweetsidle.service
+.B sweetidle.service
 unit runs with
 .BR graphical-session.target .
 Enable it with:
 .PP
 .EX
-systemctl --user enable --now sweetsidle.service
+systemctl --user enable --now sweetidle.service
 .EE
 .PP
-Don't also start sweetsidle from your compositor config.
+Don't also start sweetidle from your compositor config.
 .SH EXIT STATUS
-.B sweetsidle
+.B sweetidle
 returns 0 on success and 2 on any error.
 .SH EXAMPLES
 Validate an explicit configuration:
 .PP
 .EX
-sweetsidle --config ./config.toml --check-config
+sweetidle --config ./config.toml --check-config
 .EE
 .PP
 Run with verbose diagnostics:
 .PP
 .EX
-sweetsidle --verbose --config ./config.toml
+sweetidle --verbose --config ./config.toml
 .EE
 .PP
 Read the paused state:
 .PP
 .EX
-sweetsidle status --json | jq -r .paused
+sweetidle status --json | jq -r .paused
 .EE
 .PP
 Reload the active configuration:
 .PP
 .EX
-pkill -HUP -x sweetsidle
+pkill -HUP -x sweetidle
 .EE
 .SH SEE ALSO
 .BR systemctl (1),
@@ -268,7 +268,7 @@ pkill -HUP -x sweetsidle
 .PP
 Project source and documentation:
 .br
-https://github.com/naurissteins/sweetsidle
+https://github.com/naurissteins/sweetidle
 .SH AUTHORS
 Nauris Steins
 .SH LICENSE

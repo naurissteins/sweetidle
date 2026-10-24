@@ -1,13 +1,13 @@
 [Unit]
 Description=Sweets idle management daemon
-Documentation=https://github.com/naurissteins/sweetsidle
+Documentation=https://github.com/naurissteins/sweetidle
 PartOf=graphical-session.target
 After=graphical-session.target
 ConditionEnvironment=WAYLAND_DISPLAY
 
 [Service]
 Type=exec
-ExecStart=sweetsidle
+ExecStart=sweetidle
 ExecReload=kill -HUP $MAINPID
 KillMode=process
 Restart=on-failure

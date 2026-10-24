@@ -82,7 +82,7 @@ pub(super) async fn acquire_delay_inhibitor(
     proxy
         .inhibit(
             "sleep",
-            "sweetsidle",
+            "sweetidle",
             "run the configured before-sleep command",
             "delay",
         )
