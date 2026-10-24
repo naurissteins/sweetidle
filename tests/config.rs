@@ -4,9 +4,9 @@ use tempfile::TempDir;
 
 fn config_home() -> Result<TempDir, Box<dyn Error>> {
     let home = tempfile::tempdir()?;
-    fs::create_dir_all(home.path().join(".config/sweetsidle"))?;
+    fs::create_dir_all(home.path().join(".config/sweetidle"))?;
     fs::write(
-        home.path().join(".config/sweetsidle/config.toml"),
+        home.path().join(".config/sweetidle/config.toml"),
         "[[listener]]\ntimeout = 30\n",
     )?;
     Ok(home)
@@ -15,7 +15,7 @@ fn config_home() -> Result<TempDir, Box<dyn Error>> {
 #[test]
 fn empty_home_does_not_load_config_from_the_working_directory() -> Result<(), Box<dyn Error>> {
     let directory = config_home()?;
-    let output = Command::new(env!("CARGO_BIN_EXE_sweetsidle"))
+    let output = Command::new(env!("CARGO_BIN_EXE_sweetidle"))
         .arg("--check-config")
         .env("HOME", "")
         .current_dir(directory.path())
@@ -32,7 +32,7 @@ fn empty_home_does_not_load_config_from_the_working_directory() -> Result<(), Bo
 #[test]
 fn relative_home_does_not_load_config_from_the_working_directory() -> Result<(), Box<dyn Error>> {
     let directory = config_home()?;
-    let output = Command::new(env!("CARGO_BIN_EXE_sweetsidle"))
+    let output = Command::new(env!("CARGO_BIN_EXE_sweetidle"))
         .arg("--check-config")
         .env("HOME", ".")
         .current_dir(directory.path())
@@ -48,7 +48,7 @@ fn relative_home_does_not_load_config_from_the_working_directory() -> Result<(),
 
 #[test]
 fn missing_home_reports_how_to_select_a_config() -> Result<(), Box<dyn Error>> {
-    let output = Command::new(env!("CARGO_BIN_EXE_sweetsidle"))
+    let output = Command::new(env!("CARGO_BIN_EXE_sweetidle"))
         .arg("--check-config")
         .env_remove("HOME")
         .output()?;
@@ -64,7 +64,7 @@ fn missing_home_reports_how_to_select_a_config() -> Result<(), Box<dyn Error>> {
 #[test]
 fn absolute_home_loads_the_default_config() -> Result<(), Box<dyn Error>> {
     let home = config_home()?;
-    let output = Command::new(env!("CARGO_BIN_EXE_sweetsidle"))
+    let output = Command::new(env!("CARGO_BIN_EXE_sweetidle"))
         .arg("--check-config")
         .env("HOME", home.path())
         .output()?;
@@ -81,12 +81,12 @@ fn absolute_home_loads_the_default_config() -> Result<(), Box<dyn Error>> {
 fn explicit_relative_config_does_not_require_valid_home() -> Result<(), Box<dyn Error>> {
     let directory = config_home()?;
     for home in [None, Some(""), Some("relative")] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_sweetsidle"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_sweetidle"));
         command
             .args([
                 "--check-config",
                 "--config",
-                ".config/sweetsidle/config.toml",
+                ".config/sweetidle/config.toml",
             ])
             .current_dir(directory.path());
         if let Some(home) = home {

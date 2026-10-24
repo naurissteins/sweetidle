@@ -31,7 +31,7 @@ impl ConfigReloadMonitor {
         let (request_sender, request_receiver) = mpsc::channel();
         let (event_sender, event_channel) = channel();
         let thread = thread::Builder::new()
-            .name("sweetsidle-config".to_string())
+            .name("sweetidle-config".to_string())
             .spawn(move || run_worker(&path, &request_receiver, &event_sender))
             .map_err(RuntimeError::SpawnReloadWorker)?;
 

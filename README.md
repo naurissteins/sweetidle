@@ -1,6 +1,6 @@
-# sweetsidle
+# sweetidle
 
-`sweetsidle` is a lightweight Wayland idle daemon for the Sweets compositor.
+`sweetidle` is a lightweight Wayland idle daemon for the Sweets compositor.
 It runs commands when you go idle, come back, lock the session, or suspend.
 
 ## Quick start
@@ -9,22 +9,22 @@ On NixOS, first enter the [development shell](#nixos-development).
 
 ```sh
 cargo build --release
-mkdir -p ~/.config/sweetsidle
-cp config/example.toml ~/.config/sweetsidle/config.toml
-./target/release/sweetsidle --check-config
-./target/release/sweetsidle
+mkdir -p ~/.config/sweetidle
+cp config/example.toml ~/.config/sweetidle/config.toml
+./target/release/sweetidle --check-config
+./target/release/sweetidle
 ```
 
 Use another config with `--config`:
 
 ```sh
-./target/release/sweetsidle --config ~/.config/sweetsidle/laptop.toml
+./target/release/sweetidle --config ~/.config/sweetidle/laptop.toml
 ```
 
 ## Configuration examples
 
 Config is TOML, UTF-8, and at most 1 MiB. Commands run through `sh -c` in their
-own process group, so stopping sweetsidle leaves them running.
+own process group, so stopping sweetidle leaves them running.
 
 The default path needs an absolute `HOME`. Use `--config <PATH>` to avoid that.
 
@@ -114,11 +114,11 @@ Unknown fields, bad timeouts, and empty commands are rejected.
 ## Control commands
 
 ```sh
-sweetsidle status          # show daemon state
-sweetsidle status --json   # same, for scripts and bars
-sweetsidle pause           # stop idle timers
-sweetsidle resume          # restart timers from zero
-sweetsidle reload          # reload config (or: pkill -HUP -x sweetsidle)
+sweetidle status          # show daemon state
+sweetidle status --json   # same, for scripts and bars
+sweetidle pause           # stop idle timers
+sweetidle resume          # restart timers from zero
+sweetidle reload          # reload config (or: pkill -HUP -x sweetidle)
 ```
 
 Pause does not stop running commands or sleep and lock hooks.
@@ -154,22 +154,22 @@ For distributions with a writable `/usr/local`:
 
 ```sh
 cargo build --release
-sudo install -Dm755 target/release/sweetsidle /usr/local/bin/sweetsidle
-sudo install -Dm644 systemd/sweetsidle.service /usr/local/lib/systemd/user/sweetsidle.service
-sudo install -Dm644 man/sweetsidle.1 /usr/local/share/man/man1/sweetsidle.1
+sudo install -Dm755 target/release/sweetidle /usr/local/bin/sweetidle
+sudo install -Dm644 systemd/sweetidle.service /usr/local/lib/systemd/user/sweetidle.service
+sudo install -Dm644 man/sweetidle.1 /usr/local/share/man/man1/sweetidle.1
 systemctl --user daemon-reload
-systemctl --user enable --now sweetsidle.service
+systemctl --user enable --now sweetidle.service
 ```
 
 Useful commands:
 
 ```sh
-systemctl --user status sweetsidle.service
-systemctl --user reload sweetsidle.service
-journalctl --user --unit=sweetsidle.service --follow
+systemctl --user status sweetidle.service
+systemctl --user reload sweetidle.service
+journalctl --user --unit=sweetidle.service --follow
 ```
 
-Don't also start sweetsidle from your compositor config.
+Don't also start sweetidle from your compositor config.
 
 NixOS has no package or service module yet. Run the local build from a Wayland
 terminal instead.
@@ -177,9 +177,9 @@ terminal instead.
 ## Command-line help
 
 ```sh
-sweetsidle --help
-man sweetsidle
-man -l man/sweetsidle.1   # without installing
+sweetidle --help
+man sweetidle
+man -l man/sweetidle.1   # without installing
 ```
 
 ## Development
@@ -199,7 +199,7 @@ files are untracked. With direnv, review `.envrc` and run `direnv allow`.
 Rebuild binaries copied from other distributions. No Wayland or systemd
 development libraries are needed.
 
-Hooks inherit sweetsidle's `PATH`, so `sh` and your helpers must be on it. Start
+Hooks inherit sweetidle's `PATH`, so `sh` and your helpers must be on it. Start
 the daemon from your Wayland session so it gets `WAYLAND_DISPLAY`,
 `XDG_RUNTIME_DIR`, and the D-Bus address.
 

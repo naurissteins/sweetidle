@@ -1,5 +1,5 @@
 {
-  description = "sweetsidle development environment";
+  description = "sweetidle development environment";
 
   inputs.nixpkgs.url = "https://channels.nixos.org/nixos-26.05/nixexprs.tar.zst";
 
@@ -11,7 +11,7 @@
       pkgs = nixpkgs.legacyPackages.${system};
     in {
       default = pkgs.mkShell {
-        name = "sweetsidle-dev";
+        name = "sweetidle-dev";
         packages = with pkgs; [
           bash
           cargo

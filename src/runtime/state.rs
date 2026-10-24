@@ -255,25 +255,25 @@ impl RuntimeState {
                 ControlEvent::Pause(request) => {
                     let changed = self.pause_idle();
                     request.respond(if changed {
-                        "sweetsidle: paused\n".to_string()
+                        "sweetidle: paused\n".to_string()
                     } else {
-                        "sweetsidle: already paused\n".to_string()
+                        "sweetidle: already paused\n".to_string()
                     });
                 }
                 ControlEvent::Resume(request) => {
                     let changed = self.resume_idle()?;
                     request.respond(if changed {
-                        "sweetsidle: resumed\n".to_string()
+                        "sweetidle: resumed\n".to_string()
                     } else {
-                        "sweetsidle: already running\n".to_string()
+                        "sweetidle: already running\n".to_string()
                     });
                 }
                 ControlEvent::Reload(request) => match self.request_reload() {
                     ReloadRequestOutcome::Requested => {
-                        request.respond("sweetsidle: reload requested\n".to_string());
+                        request.respond("sweetidle: reload requested\n".to_string());
                     }
                     ReloadRequestOutcome::AlreadyPending => {
-                        request.respond("sweetsidle: reload already pending\n".to_string());
+                        request.respond("sweetidle: reload already pending\n".to_string());
                     }
                     ReloadRequestOutcome::Unavailable => {
                         request.respond(
@@ -282,7 +282,7 @@ impl RuntimeState {
                         );
                     }
                     ReloadRequestOutcome::ShuttingDown => {
-                        request.respond("error: sweetsidle is shutting down\n".to_string());
+                        request.respond("error: sweetidle is shutting down\n".to_string());
                     }
                     ReloadRequestOutcome::Failed => {
                         return Err(RuntimeError::ReloadRequestChannelClosed);
@@ -1271,13 +1271,13 @@ mod tests {
         assert_runtime_ok(state.route_control_events());
         assert_runtime_ok(state.route_idle_event(IdleEvent::Resumed(ListenerId::from_index(1))));
 
-        assert_eq!(response.recv(), Ok("sweetsidle: paused\n".to_string()));
+        assert_eq!(response.recv(), Ok("sweetidle: paused\n".to_string()));
         assert!(state.command_intents.is_empty());
         assert!(
             state
                 .status_snapshot()
                 .to_string()
-                .contains("sweetsidle: paused")
+                .contains("sweetidle: paused")
         );
     }
 
@@ -1335,7 +1335,7 @@ mod tests {
             state
                 .status_snapshot()
                 .to_string()
-                .contains("sweetsidle: paused")
+                .contains("sweetidle: paused")
         );
     }
 
@@ -1643,7 +1643,7 @@ mod tests {
         let mut state = runtime_state();
         state.reload_pending = true;
         let error = match Config::load(std::path::Path::new(
-            "/definitely-missing-sweetsidle-config.toml",
+            "/definitely-missing-sweetidle-config.toml",
         )) {
             Ok(config) => panic!("unexpected config: {config:?}"),
             Err(error) => error,

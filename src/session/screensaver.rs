@@ -61,7 +61,7 @@ pub enum DbusInhibitError {
 impl DbusInhibitMonitor {
     pub(crate) fn connect() -> Result<(Self, Channel<DbusInhibitEvent>), DbusInhibitError> {
         let (event_sender, event_channel) = channel();
-        let worker = Worker::spawn("sweetsidle-dbus-inhibit", move |ready, shutdown| {
+        let worker = Worker::spawn("sweetidle-dbus-inhibit", move |ready, shutdown| {
             run_worker(event_sender, ready, shutdown)
         })?;
 
@@ -175,9 +175,7 @@ impl ScreenSaverService {
                 .is_err()
             {
                 let _ = registry.remove(cookie, &owner);
-                return Err(fdo::Error::Failed(
-                    "sweetsidle is shutting down".to_string(),
-                ));
+                return Err(fdo::Error::Failed("sweetidle is shutting down".to_string()));
             }
             cookie
         };

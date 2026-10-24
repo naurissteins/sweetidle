@@ -166,7 +166,7 @@ mod tests {
         fn new(source: &str) -> Self {
             let id = NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "sweetsidle-config-test-{}-{id}.toml",
+                "sweetidle-config-test-{}-{id}.toml",
                 std::process::id()
             ));
             if let Err(error) = fs::write(&path, source) {

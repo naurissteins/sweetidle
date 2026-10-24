@@ -154,7 +154,7 @@ impl fmt::Display for StatusSnapshot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             formatter,
-            "sweetsidle: {}",
+            "sweetidle: {}",
             if self.paused { "paused" } else { "running" }
         )?;
         writeln!(
@@ -279,7 +279,7 @@ mod tests {
             assert_eq!(
                 status.to_string(),
                 format!(
-                    "sweetsidle: running\ntracked inhibitors active: false\nidle hint: disabled\nlisteners:\n  - id=0 state={state_label} timeout=300s inhibitors={policy_label}\ntracked inhibitors: none\n"
+                    "sweetidle: running\ntracked inhibitors active: false\nidle hint: disabled\nlisteners:\n  - id=0 state={state_label} timeout=300s inhibitors={policy_label}\ntracked inhibitors: none\n"
                 )
             );
             let rendered = status
@@ -326,7 +326,7 @@ mod tests {
         assert_eq!(
             status.to_string(),
             concat!(
-                "sweetsidle: paused\n",
+                "sweetidle: paused\n",
                 "tracked inhibitors active: true\n",
                 "idle hint: active\n",
                 "listeners:\n",

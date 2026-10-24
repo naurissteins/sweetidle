@@ -3,7 +3,7 @@ mod event_log;
 
 use std::path::PathBuf;
 
-use sweetsidle::{
+use sweetidle::{
     config::Config,
     control,
     runtime::{ConfigReloadOutcome, IdleRuntime},
@@ -25,7 +25,7 @@ fn main() {
 fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
     match parse_args(args)? {
         Action::Help => print_help(),
-        Action::Version => println!("sweetsidle {VERSION}"),
+        Action::Version => println!("sweetidle {VERSION}"),
         Action::Status(StatusOutput::Text) => print_control(control::query_status())?,
         Action::Status(StatusOutput::Json) => print_control(control::query_status_json())?,
         Action::Pause => print_control(control::pause())?,
@@ -69,7 +69,7 @@ fn run_daemon(path: Option<PathBuf>, verbose: bool) -> Result<(), String> {
         config = %loaded.path.display(),
         listeners = active_config.listeners.len(),
         idle_hint_timeout_seconds = ?active_config.idle_hint_timeout_seconds,
-        "sweetsidle started"
+        "sweetidle started"
     );
 
     // the runtime blocks until an event wakes this loop
@@ -87,7 +87,7 @@ fn run_daemon(path: Option<PathBuf>, verbose: bool) -> Result<(), String> {
         }
 
         if shutdown {
-            info!("sweetsidle stopped");
+            info!("sweetidle stopped");
             return Ok(());
         }
 
@@ -154,5 +154,5 @@ fn default_config_path() -> Result<PathBuf, String> {
         return Err("HOME must be absolute; pass --config <PATH>".to_string());
     }
 
-    Ok(home.join(".config/sweetsidle/config.toml"))
+    Ok(home.join(".config/sweetidle/config.toml"))
 }
