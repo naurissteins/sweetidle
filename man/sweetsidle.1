@@ -20,72 +20,41 @@ sweetsidle \- Wayland idle management daemon for the Sweets compositor
 .B \-\-check-config
 .SH DESCRIPTION
 .B sweetsidle
-is a lightweight Wayland idle management daemon and the recommended idle
-daemon for the Sweets compositor.
-It uses the
+is a lightweight Wayland idle daemon for the Sweets compositor.
+It uses
 .B ext-idle-notify-v1
-protocol to run configured commands after periods of inactivity and when input
-resumes.
+to run commands when you go idle and when you return.
+It also runs hooks for sleep, resume, lock, and unlock, and respects idle
+inhibitors by default.
 .PP
-The daemon can also run commands before sleep, after resume, and in response to
-logind lock and unlock requests.
-It respects compositor, ScreenSaver D-Bus, and systemd-logind idle inhibitors
-by default.
-.PP
-With no command,
-.B sweetsidle
-loads its configuration and remains in the foreground until it receives a
-termination signal or encounters a fatal runtime error.
+With no command, it runs in the foreground until stopped.
 .SH COMMANDS
 .TP
 .B status
-Show the daemon's running or paused state, idle-hint state, listener state, and
-tracked D-Bus and systemd inhibitors.
-The daemon must already be running.
+Show daemon, listener, idle-hint, and inhibitor state.
 .TP
 .B "status --json"
-Emit the same live snapshot as one compact JSON object followed by a newline.
-The object contains
+Print the same state as one JSON object with
 .BR schema_version ,
 .BR paused ,
 .BR idle_hint ,
 .BR listeners ,
 and
 .BR inhibitors .
-This form is intended for scripts and status bars.
 .TP
 .B pause
-Suspend every idle listener and clear the logind idle hint.
-Commands already running and explicit sleep, resume, lock, and unlock hooks are
-not interrupted.
-Repeating the command is harmless.
+Stop idle timers and clear the idle hint.
+Running commands and sleep and lock hooks are not affected.
 .TP
 .B resume
-Resume idle detection and start every listener with a fresh timeout.
-Actions that became due while paused do not run immediately.
-Repeating the command is harmless.
+Restart idle timers from zero.
 .TP
 .B reload
-Queue a reload of the active configuration through the control socket.
-The response confirms the request was queued; check daemon logs for validation
-and application results.
-If a reload is already pending, the response reports that it is pending.
-Requests received while a reload is pending are coalesced into one follow-up
-read, even if the pending read is rejected.
-Running commands continue across reloads.
-Unchanged timed-out listeners keep their idle cycle and notification, including
-after reordering; their own resume notification completes the cycle.
-Changing or removing a timed-out listener rejects the entire reload.
-Retry after that listener resumes.
-Other listeners and the idle-hint timer receive fresh timeouts on an applied reload.
-Unchanged listener definitions retain duplicate suppression even when reordered;
-accepted changes or removals of armed definitions release their old slots
-without stopping their commands.
-A definition includes its timeout, timeout and resume commands, and inhibitor
-policy.
-Identical definitions match one-to-one, prioritizing timed-out copies over armed
-copies and then matching in configuration order.
-Session hook slots remain occupied across reloads until their commands exit.
+Queue a config reload; check the logs for the result.
+An invalid config keeps the old one active.
+Running commands keep running.
+Changing a listener that has already timed out rejects the reload; retry after
+activity resumes.
 .SH OPTIONS
 .TP
 .BI "\-c " PATH ", \-\-config " PATH
@@ -94,8 +63,7 @@ Read configuration from
 instead of the default path.
 .TP
 .B \-\-check-config
-Parse and validate the selected configuration, report the result, and exit
-without connecting to Wayland or starting the daemon.
+Validate the configuration and exit.
 .TP
 .BR \-v ", " \-\-verbose
 Enable debug-level runtime logging.
@@ -104,7 +72,6 @@ Enable debug-level runtime logging.
 Print machine-readable output for the
 .B status
 command.
-It is rejected with other commands and during daemon startup.
 .TP
 .BR \-h ", " \-\-help
 Print command-line help and exit.
@@ -114,12 +81,9 @@ Print the version and exit.
 .SH CONFIGURATION
 The default configuration path is
 .IR ~/.config/sweetsidle/config.toml .
-The file uses TOML and rejects unknown fields.
-It must be UTF-8 and at most 1 MiB (1048576 bytes).
-Oversized files are rejected during startup, validation, and reload;
-a rejected reload keeps the last valid configuration active.
-Timeouts are integers from 1 through 4294967, measured in seconds.
-Configured command strings must not be empty and are executed through
+The file is UTF-8 TOML, at most 1 MiB, and unknown fields are rejected.
+Timeouts are seconds from 1 to 4294967.
+Commands must not be empty and run through
 .BR "sh -c" .
 .PP
 The optional
@@ -127,38 +91,32 @@ The optional
 table accepts the following fields:
 .TP
 .B lock_command
-Command run for a logind session lock request.
+Run on a logind lock request.
 .TP
 .B unlock_command
-Command run for a logind session unlock request.
-Leave this unset unless the locker provides a safe external unlock operation.
-Lock and unlock requests are routed in logind signal order.
-Hooks run asynchronously, so completion order is not guaranteed.
+Run on a logind unlock request.
+Only set this if your locker has a safe unlock command.
 .TP
 .B before_sleep_command
-Command run before the system enters sleep.
+Run before suspend.
 .TP
 .B after_resume_command
-Command run after logind reports that the sleep operation finished or failed.
+Run after resume.
 .TP
 .B wait_before_sleep
-When true, hold a logind delay inhibitor until the before-sleep command exits
-or logind reports that the sleep operation completed or failed.
-Logind may proceed after its maximum delay even if the inhibitor is still held.
-Finishing the sleep cycle releases its inhibitor without stopping the command.
-A still-running command can delay each later sleep attempt up to the maximum;
-prefer a locker that daemonizes only after the session is locked.
+Delay suspend until the before-sleep command exits, up to logind's maximum
+delay.
+Use a locker that daemonizes only after locking.
 Defaults to true.
 .TP
 .B ignore_dbus_inhibit
-When true, do not provide or respect the
+Ignore
 .B org.freedesktop.ScreenSaver
-inhibition service.
+inhibitors.
 Defaults to false.
 .TP
 .B ignore_systemd_inhibit
-When true, do not use systemd-logind idle inhibitors to suppress listener
-actions.
+Ignore systemd-logind idle inhibitors.
 Defaults to false.
 .PP
 The optional
@@ -166,29 +124,27 @@ The optional
 table has one required
 .B timeout
 field.
-After that period of inactivity, sweetsidle reports the session as idle to
-logind.
-Activity, inhibition, unlock, resume, pause, and clean shutdown clear the hint.
+After that many idle seconds, the session is reported idle to logind.
 .PP
 Each
 .B [[listener]]
 table accepts:
 .TP
 .B timeout
-Required inactivity period in seconds.
+Required idle time in seconds.
 .TP
 .B on_timeout
-Optional command run when the timeout expires.
+Run when the timeout expires.
 .TP
 .B on_resume
-Optional command run when activity returns after this listener timed out.
+Run when activity returns after this timeout.
 .TP
 .B ignore_inhibit
-When true, allow this listener to run despite compositor, ScreenSaver D-Bus,
-and systemd inhibitors.
+Run despite all idle inhibitors.
+Requires
+.B ext_idle_notifier_v1
+version 2.
 Defaults to false.
-This policy requires version 2 of
-.BR ext_idle_notifier_v1 .
 .SH EXAMPLE CONFIGURATION
 .EX
 [general]
@@ -210,81 +166,48 @@ on_timeout = "sweetsmsg output '*' power off"
 on_resume = "sweetsmsg output '*' power on"
 .EE
 .SH INHIBITORS
-Ordinary listeners respect compositor idle inhibitors, ScreenSaver D-Bus
-inhibitors, and block-mode systemd-logind inhibitors whose operation list
-contains
-.BR idle .
-The ScreenSaver interface is available at both
+Listeners respect compositor, ScreenSaver D-Bus, and systemd-logind
+.B idle
+inhibitors by default.
+The ScreenSaver service answers at
 .I /org/freedesktop/ScreenSaver
 and
 .IR /ScreenSaver .
-A listener with
-.B ignore_inhibit = true
-bypasses all three sources.
-ScreenSaver inhibitors are released when their D-Bus client disconnects,
-including during an Inhibit call.
-.PP
-The
 .B status
-command can list ScreenSaver and systemd inhibitor details.
-The idle-notify protocol does not expose compositor inhibitor identities, so
-they cannot be included in status output.
+lists D-Bus and systemd inhibitors; compositor inhibitors are not visible to
+clients.
 .SH CONTROL SOCKET
-A running daemon owns
+Control commands talk to
 .I $XDG_RUNTIME_DIR/sweetsidle.sock
-with mode 0600.
-The
-.BR status ,
-.BR pause ,
-and
-.B resume
-commands use this local socket.
-An abandoned socket is replaced on startup, while a live socket prevents a
-second daemon instance from starting.
+(mode 0600).
+A live socket prevents a second daemon from starting.
 .SH SIGNALS
 .TP
 .B SIGINT, SIGTERM
-Stop the daemon cleanly.
-Configured commands that are already running are left running.
-Each command starts in its own process group, so terminal Ctrl-C does not
-interrupt running lockers or helpers.
+Stop the daemon.
+Running commands keep running.
 .TP
 .B SIGHUP
-Queue the same reload as the
-.B reload
-command without stopping the daemon.
-Requests received while a reload is pending schedule the same coalesced
-follow-up read as the control command.
-Configuration and compositor compatibility validation failures are rejected
-and the complete last valid configuration remains active.
-Unchanged timed-out listeners retain their pending resume lifecycle;
-reload does not count as activity or repeat their timeout actions.
-Candidates that change or remove a timed-out listener are rejected and can be
-retried after that listener resumes.
-Changes that would alter required D-Bus or logind integrations require a daemon
-restart and are not applied partially.
+Same as
+.BR reload .
 .SH ENVIRONMENT
 .TP
 .B HOME
-Used to construct the default configuration path.
-For startup and config validation, it must be set to an absolute path when no
+Used for the default config path.
+Must be absolute unless
 .B \-\-config
-option is supplied.
-Empty or relative values are rejected.
-Explicit configuration paths do not depend on HOME and may be relative to the
-working directory.
+is given.
 .TP
 .B XDG_RUNTIME_DIR
-Directory containing the owner-only control socket.
-Required by control commands and normal daemon startup.
+Holds the control socket.
+Required.
 .TP
 .B WAYLAND_DISPLAY
-Identifies the Wayland display used by the daemon.
+Wayland display to connect to.
 .TP
 .B XDG_SESSION_ID
-Used when resolving the current logind session.
-If unavailable, sweetsidle asks logind for the session associated with its
-process ID.
+Logind session to use.
+If unset, the session is looked up by process ID.
 .SH FILES
 .TP
 .I ~/.config/sweetsidle/config.toml
@@ -294,29 +217,25 @@ Default user configuration.
 Local control socket.
 .TP
 .I /usr/lib/systemd/user/sweetsidle.service
-Typical packaged location of the systemd user service.
+Systemd user service.
 .TP
 .I /usr/share/man/man1/sweetsidle.1
-Typical packaged location of this manual page.
+This manual page.
 .SH SYSTEMD USER SERVICE
 The supplied
 .B sweetsidle.service
-unit runs the daemon as part of
+unit runs with
 .BR graphical-session.target .
-After installing the binary, unit, and manual page, enable it with:
+Enable it with:
 .PP
 .EX
 systemctl --user enable --now sweetsidle.service
 .EE
 .PP
-Do not also launch sweetsidle from compositor configuration while the service
-is enabled.
+Don't also start sweetsidle from your compositor config.
 .SH EXIT STATUS
 .B sweetsidle
-returns 0 after successful informational commands, validation, or clean daemon
-shutdown.
-It returns 2 for invalid arguments, configuration errors, control-socket
-failures, and daemon startup or runtime failures.
+returns 0 on success and 2 on any error.
 .SH EXAMPLES
 Validate an explicit configuration:
 .PP
@@ -330,7 +249,7 @@ Run with verbose diagnostics:
 sweetsidle --verbose --config ./config.toml
 .EE
 .PP
-Read the paused state from JSON status output:
+Read the paused state:
 .PP
 .EX
 sweetsidle status --json | jq -r .paused
