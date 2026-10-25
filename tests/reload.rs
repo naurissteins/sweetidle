@@ -439,7 +439,7 @@ fn hook_stderr_reaches_the_daemon_log_but_stdout_does_not() -> Result<(), Box<dy
 
 #[test]
 #[ignore = "runs the real daemon against a private Wayland compositor"]
-fn compositor_hangup_stops_the_daemon_cleanly() -> Result<(), Box<dyn Error>> {
+fn compositor_hangup_fails_with_a_clear_error() -> Result<(), Box<dyn Error>> {
     let mut harness = ReloadHarness::start("initial")?;
     harness.wait_for_markers(1)?;
 
@@ -447,9 +447,9 @@ fn compositor_hangup_stops_the_daemon_cleanly() -> Result<(), Box<dyn Error>> {
 
     let status = harness.daemon.wait_for_status()?;
     let log = fs::read_to_string(&harness.log_path)?;
-    assert!(status.success(), "{status}: {log}");
+    assert_eq!(status.code(), Some(2), "{log}");
     assert!(
-        log.contains("compositor closed the Wayland connection"),
+        log.contains("error: compositor closed the Wayland connection\n"),
         "{log}"
     );
     assert!(!harness.temp_dir.path().join("sweetidle.sock").exists());

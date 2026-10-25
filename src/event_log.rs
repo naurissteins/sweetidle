@@ -32,10 +32,6 @@ pub(super) fn handle_runtime_event(event: RuntimeEvent) -> RuntimeControl {
             info!(signal = signal.name(), "shutdown requested");
             RuntimeControl::Shutdown
         }
-        RuntimeEvent::CompositorDisconnected => {
-            info!("compositor closed the Wayland connection");
-            RuntimeControl::Shutdown
-        }
         RuntimeEvent::ConfigReloadRequested => {
             info!("configuration reload requested");
             RuntimeControl::Continue
@@ -200,10 +196,6 @@ mod tests {
                 RuntimeControl::Shutdown
             ));
         }
-        assert!(matches!(
-            handle_runtime_event(RuntimeEvent::CompositorDisconnected),
-            RuntimeControl::Shutdown
-        ));
     }
 
     #[test]
