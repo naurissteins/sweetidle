@@ -24,6 +24,9 @@ use wayland_server::{
 
 // each case runs the daemon against a private compositor and runtime dir
 const WAIT_LIMIT: Duration = Duration::from_secs(5);
+// some launchers leave SIGCHLD ignored, which survives exec
+const IGNORE_SIGCHLD: &str = "trap '' CHLD; exec \"$0\" \"$@\"";
+const SIGCHLD_MASK: u64 = 1 << (17 - 1);
 
 #[test]
 #[ignore = "runs the real daemon against a private Wayland compositor"]
@@ -348,6 +351,37 @@ fn foreground_group_interrupt_leaves_running_commands_alive() -> Result<(), Box<
     Ok(())
 }
 
+#[test]
+#[ignore = "runs the real daemon against a private Wayland compositor"]
+fn ignored_sigchld_from_the_launcher_does_not_stop_command_reaping() -> Result<(), Box<dyn Error>> {
+    let mut harness = ReloadHarness::start_with_launcher("initial", None, 2, IGNORE_SIGCHLD)?;
+    harness.wait_for_markers(1)?;
+    harness.wait_for_log("command finished")?;
+    harness.resume_listener_cycle()?;
+    let marker_path = shell_quote(path_text(&harness.marker_path)?);
+    let command = format!("grep SigIgn /proc/self/status >> {marker_path}");
+    fs::write(
+        &harness.config_path,
+        format!(
+            "[general]\nignore_dbus_inhibit = true\nignore_systemd_inhibit = true\n\n[[listener]]\ntimeout = 3600\non_timeout = \"{command}\"\nignore_inhibit = true\n"
+        ),
+    )?;
+    harness.signal_reload()?;
+    harness.wait_for_markers(2)?;
+    harness.wait_for_log_count("command finished", 2)?;
+
+    // hooks must start with default SIGCHLD, whatever the daemon inherited
+    let markers = harness.markers()?;
+    let ignored = markers[1]
+        .strip_prefix("SigIgn:")
+        .ok_or("hook did not report its ignored signals")?;
+    let ignored = u64::from_str_radix(ignored.trim(), 16)?;
+    assert_eq!(ignored & SIGCHLD_MASK, 0, "hook inherited ignored SIGCHLD");
+    assert!(harness.status()?.contains("sweetidle: running"));
+    harness.stop()?;
+    Ok(())
+}
+
 struct ReloadHarness {
     config_path: std::path::PathBuf,
     marker_path: std::path::PathBuf,
@@ -374,6 +408,20 @@ impl ReloadHarness {
         resume_marker: Option<&str>,
         notifier_version: u32,
     ) -> Result<Self, Box<dyn Error>> {
+        Self::start_with_launcher(
+            initial_marker,
+            resume_marker,
+            notifier_version,
+            "exec \"$0\" \"$@\"",
+        )
+    }
+
+    fn start_with_launcher(
+        initial_marker: &str,
+        resume_marker: Option<&str>,
+        notifier_version: u32,
+        launcher: &str,
+    ) -> Result<Self, Box<dyn Error>> {
         let temp_dir = tempfile::tempdir()?;
         let config_path = temp_dir.path().join("config.toml");
         let marker_path = temp_dir.path().join("commands.log");
@@ -390,7 +438,9 @@ impl ReloadHarness {
 
         let log = File::create(&log_path)?;
         let log_stdout = log.try_clone()?;
-        let child = Command::new(env!("CARGO_BIN_EXE_sweetidle"))
+        // the launcher shell execs the daemon, so the child PID stays the daemon's
+        let child = Command::new("sh")
+            .args(["-c", launcher, env!("CARGO_BIN_EXE_sweetidle")])
             .args(["--config", path_text(&config_path)?])
             .env("WAYLAND_DISPLAY", &socket_path)
             .env("XDG_RUNTIME_DIR", temp_dir.path())
