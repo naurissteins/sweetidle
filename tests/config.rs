@@ -1,4 +1,4 @@
-use std::{error::Error, fs, process::Command};
+use std::{error::Error, ffi::OsStr, fs, os::unix::ffi::OsStrExt, process::Command};
 
 use tempfile::TempDir;
 
@@ -98,5 +98,38 @@ fn explicit_relative_config_does_not_require_valid_home() -> Result<(), Box<dyn 
 
         assert!(output.status.success(), "HOME={home:?}: {output:?}");
     }
+    Ok(())
+}
+
+#[test]
+fn non_utf8_config_path_is_loaded_unchanged() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join(OsStr::from_bytes(b"idle-\xff.toml"));
+    fs::write(&path, "[[listener]]\ntimeout = 30\n")?;
+    let output = Command::new(env!("CARGO_BIN_EXE_sweetidle"))
+        .arg("--check-config")
+        .arg("--config")
+        .arg(&path)
+        .output()?;
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        "configuration ok: 1 listener(s), idle hint disabled\n"
+    );
+    Ok(())
+}
+
+#[test]
+fn non_utf8_unknown_argument_is_a_usage_error() -> Result<(), Box<dyn Error>> {
+    let output = Command::new(env!("CARGO_BIN_EXE_sweetidle"))
+        .arg(OsStr::from_bytes(b"--bad-\xff"))
+        .output()?;
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8(output.stderr)?,
+        "error: unknown argument `--bad-\u{fffd}`\ntry `sweetidle --help`\n"
+    );
     Ok(())
 }
