@@ -104,8 +104,11 @@ impl IdleRuntime {
     pub fn connect(config: &Config, config_path: PathBuf) -> Result<Self, RuntimeError> {
         let listeners = ListenerSet::from_config(config);
         let idle_hint_timeout = config.idle_hint_timeout_seconds.map(Duration::from_secs);
-        let parts = IdleWaylandParts::connect(&listeners.timeout_requests(), idle_hint_timeout)?;
         let event_loop = EventLoop::try_new().map_err(RuntimeError::CreateEventLoop)?;
+        register_sources(&event_loop.handle())?;
+        // the socket is the single-instance guard, so claim it before any shared side effect
+        let control = register_control(&event_loop)?;
+        let parts = IdleWaylandParts::connect(&listeners.timeout_requests(), idle_hint_timeout)?;
         let source = WaylandSource::new(parts.connection, parts.event_queue);
 
         event_loop
@@ -115,10 +118,8 @@ impl IdleRuntime {
             })
             .map_err(|error| RuntimeError::RegisterWayland(error.error))?;
         let (reload, reload_requester) = register_reload(config_path, &event_loop)?;
-        register_sources(&event_loop.handle())?;
         let logind = register_logind(config, &event_loop)?;
         let dbus_inhibit = register_dbus_inhibit(config, &event_loop)?;
-        let control = register_control(&event_loop)?;
 
         Ok(Self {
             event_loop,

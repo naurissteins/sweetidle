@@ -169,7 +169,8 @@ systemctl --user reload sweetidle.service
 journalctl --user --unit=sweetidle.service --follow
 ```
 
-Don't also start sweetidle from your compositor config.
+Don't also start sweetidle from your compositor config. A second instance exits
+with `another sweetidle instance is listening` before it touches the session.
 
 NixOS has no package or service module yet. Run the local build from a Wayland
 terminal instead.

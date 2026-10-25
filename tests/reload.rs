@@ -382,6 +382,34 @@ fn ignored_sigchld_from_the_launcher_does_not_stop_command_reaping() -> Result<(
     Ok(())
 }
 
+#[test]
+#[ignore = "runs the real daemon against a private Wayland compositor"]
+fn second_instance_fails_before_connecting_to_the_compositor() -> Result<(), Box<dyn Error>> {
+    let mut harness = ReloadHarness::start("initial")?;
+    harness.wait_for_markers(1)?;
+    let created = harness.compositor.created()?;
+
+    let second = Command::new(env!("CARGO_BIN_EXE_sweetidle"))
+        .args(["--config", path_text(&harness.config_path)?])
+        .env(
+            "WAYLAND_DISPLAY",
+            harness.temp_dir.path().join("wayland-test"),
+        )
+        .env("XDG_RUNTIME_DIR", harness.temp_dir.path())
+        .output()?;
+
+    assert_eq!(second.status.code(), Some(2));
+    let stderr = String::from_utf8(second.stderr)?;
+    assert!(
+        stderr.contains("another sweetidle instance is listening"),
+        "unexpected second-instance error: {stderr}"
+    );
+    assert_eq!(harness.compositor.created()?, created);
+    assert!(harness.status()?.contains("sweetidle: running"));
+    harness.stop()?;
+    Ok(())
+}
+
 struct ReloadHarness {
     config_path: std::path::PathBuf,
     marker_path: std::path::PathBuf,
