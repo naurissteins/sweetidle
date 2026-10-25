@@ -211,9 +211,14 @@ fn run_worker(
             PollFd::new(&listener, PollFlags::IN),
             PollFd::new(&shutdown, PollFlags::IN),
         ];
-        if let Err(source) = poll(&mut poll_fds, None) {
-            let _ = events.send(ControlEvent::Failed(ControlError::Poll { source }));
-            return;
+        match poll(&mut poll_fds, None) {
+            Ok(_) => {}
+            // signals land on any thread, and SA_RESTART never restarts poll
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(source) => {
+                let _ = events.send(ControlEvent::Failed(ControlError::Poll { source }));
+                return;
+            }
         }
         if poll_fds[1]
             .revents()
@@ -380,10 +385,13 @@ mod tests {
             net::{UnixListener, UnixStream},
         },
         path::Path,
+        sync::{Arc, atomic::AtomicBool},
         thread,
         time::{Duration, Instant},
     };
 
+    use rustix::process::{Pid, Signal, kill_process};
+    use signal_hook::consts::signal::SIGUSR2;
     use tempfile::TempDir;
 
     use super::{
@@ -488,6 +496,54 @@ mod tests {
         assert!(matches!(send_command_at(&path, b""),
             Err(ControlError::ServerRejected(message)) if message == "unknown control command"));
         Ok(())
+    }
+
+    #[test]
+    fn interrupted_poll_keeps_the_worker_serving() -> Result<(), Box<dyn Error>> {
+        let temp = TempDir::new()?;
+        let path = temp.path().join("control.sock");
+        let (_monitor, events) = ControlMonitor::connect_at(path.clone())?;
+        // a handled signal interrupts the worker's poll with EINTR
+        signal_hook::flag::register(SIGUSR2, Arc::new(AtomicBool::new(false)))?;
+
+        // parallel tests run more workers with this name, and all of them must survive
+        for _ in 0..10 {
+            for tid in control_worker_tids()? {
+                let _ = kill_process(tid, Signal::USR2);
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let client_path = path.clone();
+        let client = thread::spawn(move || send_command_at(&client_path, STATUS_COMMAND));
+        let ControlEvent::Status { request, .. } = events.recv()? else {
+            panic!("expected a status request after interrupted polls");
+        };
+        request.respond("still running\n".to_string());
+        assert_eq!(
+            client
+                .join()
+                .unwrap_or_else(|_| panic!("client panicked"))?,
+            "still running\n"
+        );
+        Ok(())
+    }
+
+    fn control_worker_tids() -> std::io::Result<Vec<Pid>> {
+        let mut tids = Vec::new();
+        for entry in fs::read_dir("/proc/self/task")? {
+            let entry = entry?;
+            let Ok(comm) = fs::read_to_string(entry.path().join("comm")) else {
+                continue;
+            };
+            let tid = entry.file_name().to_str().and_then(|tid| tid.parse().ok());
+            if comm.trim_end() == "sweetidle-contr"
+                && let Some(tid) = tid.and_then(Pid::from_raw)
+            {
+                tids.push(tid);
+            }
+        }
+        Ok(tids)
     }
 
     #[test]

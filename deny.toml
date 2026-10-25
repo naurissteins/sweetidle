@@ -9,6 +9,9 @@ version = 2
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 ignore = [
+    { id = "RUSTSEC-2026-0370", reason = "zvariant merged into zbus 6; no zbus 5 fix exists until we migrate" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names merged into zbus 6; no zbus 5 fix exists until we migrate" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive merged into zbus 6; no zbus 5 fix exists until we migrate" },
 ]
 
 [licenses]
