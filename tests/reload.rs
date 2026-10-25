@@ -437,6 +437,45 @@ fn hook_stderr_reaches_the_daemon_log_but_stdout_does_not() -> Result<(), Box<dy
     Ok(())
 }
 
+#[test]
+#[ignore = "runs the real daemon against a private Wayland compositor"]
+fn compositor_hangup_stops_the_daemon_cleanly() -> Result<(), Box<dyn Error>> {
+    let mut harness = ReloadHarness::start("initial")?;
+    harness.wait_for_markers(1)?;
+
+    harness.compositor.stop()?;
+
+    let status = harness.daemon.wait_for_status()?;
+    let log = fs::read_to_string(&harness.log_path)?;
+    assert!(status.success(), "{status}: {log}");
+    assert!(
+        log.contains("compositor closed the Wayland connection"),
+        "{log}"
+    );
+    assert!(!harness.temp_dir.path().join("sweetidle.sock").exists());
+    Ok(())
+}
+
+#[test]
+#[ignore = "runs the real daemon against a private Wayland compositor"]
+fn compositor_protocol_error_still_fails_the_daemon() -> Result<(), Box<dyn Error>> {
+    let mut harness = ReloadHarness::start("initial")?;
+    harness.wait_for_markers(1)?;
+
+    assert_eq!(harness.compositor.emit(1, MockEvent::ProtocolError)?, 1);
+    // real compositors disconnect a client after posting a protocol error
+    harness.compositor.stop()?;
+
+    let status = harness.daemon.wait_for_status()?;
+    let log = fs::read_to_string(&harness.log_path)?;
+    assert_eq!(status.code(), Some(2), "{log}");
+    assert!(
+        !log.contains("compositor closed the Wayland connection"),
+        "{log}"
+    );
+    Ok(())
+}
+
 struct ReloadHarness {
     config_path: std::path::PathBuf,
     marker_path: std::path::PathBuf,
@@ -696,6 +735,18 @@ impl TestDaemon {
         self.wait_for_exit()
     }
 
+    fn wait_for_status(&mut self) -> Result<std::process::ExitStatus, Box<dyn Error>> {
+        let deadline = Instant::now() + WAIT_LIMIT;
+        while Instant::now() < deadline {
+            if let Some(status) = self.try_wait()? {
+                self.child = None;
+                return Ok(status);
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Err("sweetidle did not exit".into())
+    }
+
     fn wait_for_exit(&mut self) -> Result<(), Box<dyn Error>> {
         let child = self
             .child
@@ -734,6 +785,7 @@ enum MockEvent {
     Resume,
     Idle,
     ResumeOne(usize),
+    ProtocolError,
 }
 
 struct MockCompositor {
@@ -881,6 +933,7 @@ impl MockState {
                 MockEvent::Idle => notification.idled(),
                 MockEvent::ResumeOne(selected) if index == selected => notification.resumed(),
                 MockEvent::ResumeOne(_) => continue,
+                MockEvent::ProtocolError => notification.post_error(0_u32, "mock protocol error"),
             }
             emitted += 1;
         }

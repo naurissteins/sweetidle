@@ -175,6 +175,10 @@ journalctl --user --unit=sweetidle.service --follow
 Don't also start sweetidle from your compositor config. A second instance exits
 with `another sweetidle instance is listening` before it touches the session.
 
+When the compositor exits, for example at logout, sweetidle logs `compositor
+closed the Wayland connection` and stops with status 0, so systemd does not
+restart it. A Wayland protocol error still exits with status 2.
+
 NixOS has no package or service module yet. Run the local build from a Wayland
 terminal instead.
 

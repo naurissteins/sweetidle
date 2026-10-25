@@ -7,10 +7,11 @@ mod state;
 #[cfg(test)]
 mod test_support;
 
-use std::{path::PathBuf, time::Duration};
+use std::{io, path::PathBuf, time::Duration};
 
 use calloop::{EventLoop, channel::Event as ChannelEvent};
 use calloop_wayland_source::WaylandSource;
+use wayland_client::{Connection, DispatchError, backend::WaylandError};
 
 pub use error::RuntimeError;
 pub use shutdown::ShutdownSignal;
@@ -38,6 +39,7 @@ pub enum InhibitorChange {
 #[derive(Debug)]
 pub enum RuntimeEvent {
     ShutdownRequested(ShutdownSignal),
+    CompositorDisconnected,
     ConfigReloadRequested,
     ConfigReloadReady(Config),
     ConfigReloadRejected(ConfigLoadError),
@@ -92,6 +94,7 @@ pub enum ConfigReloadOutcome {
 
 pub struct IdleRuntime {
     event_loop: EventLoop<'static, RuntimeState>,
+    connection: Connection,
     state: RuntimeState,
     integration_features: IntegrationFeatures,
     _reload: ConfigReloadMonitor,
@@ -109,11 +112,17 @@ impl IdleRuntime {
         // the socket is the single-instance guard, so claim it before any shared side effect
         let control = register_control(&event_loop)?;
         let parts = IdleWaylandParts::connect(&listeners.timeout_requests(), idle_hint_timeout)?;
+        let connection = parts.connection.clone();
+        let protocol_errors = parts.connection.clone();
         let source = WaylandSource::new(parts.connection, parts.event_queue);
 
         event_loop
             .handle()
-            .insert_source(source, |_, event_queue, state: &mut RuntimeState| {
+            .insert_source(source, move |_, event_queue, state: &mut RuntimeState| {
+                // the source drops protocol errors from reads, which would spin on the dead socket
+                if let Some(error) = protocol_errors.protocol_error() {
+                    return Err(DispatchError::Backend(WaylandError::Protocol(error)));
+                }
                 event_queue.dispatch_pending(&mut state.wayland)
             })
             .map_err(|error| RuntimeError::RegisterWayland(error.error))?;
@@ -123,6 +132,7 @@ impl IdleRuntime {
 
         Ok(Self {
             event_loop,
+            connection,
             state: RuntimeState::new(parts.state, listeners, config, Some(reload_requester)),
             integration_features: IntegrationFeatures::from_config(config),
             _reload: reload,
@@ -136,9 +146,15 @@ impl IdleRuntime {
         &mut self,
         timeout: Option<Duration>,
     ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
-        self.event_loop
-            .dispatch(timeout, &mut self.state)
-            .map_err(RuntimeError::Dispatch)?;
+        if let Err(error) = self.event_loop.dispatch(timeout, &mut self.state) {
+            if !self.compositor_hung_up() {
+                return Err(RuntimeError::Dispatch(error));
+            }
+            self.state.discard_pending_events();
+            let mut events = self.state.take_runtime_events();
+            events.push(RuntimeEvent::CompositorDisconnected);
+            return Ok(events);
+        }
         // release completed command slots before routing events that may reuse them
         self.state.collect_ready_processes()?;
 
@@ -182,6 +198,15 @@ impl IdleRuntime {
         }
         self.flush_idle_hint_updates()?;
         Ok(ConfigReloadOutcome::Applied)
+    }
+
+    fn compositor_hung_up(&self) -> bool {
+        // the backend keeps its fatal socket error, so this names the Wayland connection as the cause
+        matches!(
+            self.connection.flush(),
+            Err(WaylandError::Io(error))
+                if matches!(error.kind(), io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset)
+        )
     }
 
     fn flush_idle_hint_updates(&mut self) -> Result<(), RuntimeError> {
