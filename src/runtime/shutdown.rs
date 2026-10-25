@@ -4,12 +4,13 @@ use std::{
         fd::{AsFd, BorrowedFd},
         unix::net::UnixStream,
     },
+    sync::{Arc, atomic::AtomicBool},
 };
 
 use calloop::{Interest, LoopHandle, Mode, PostAction, generic::Generic};
 use signal_hook::{
     SigId,
-    consts::signal::{SIGHUP, SIGINT, SIGTERM},
+    consts::signal::{SIGCHLD, SIGHUP, SIGINT, SIGTERM},
     low_level::{pipe, unregister},
 };
 
@@ -36,6 +37,13 @@ pub(super) fn register_sources(
     register_source(handle, RuntimeSignal::Interrupt)?;
     register_source(handle, RuntimeSignal::Terminate)?;
     register_source(handle, RuntimeSignal::Reload)?;
+    // an ignored SIGCHLD makes the kernel reap hooks, and any handler undoes that
+    signal_hook::flag::register(SIGCHLD, Arc::new(AtomicBool::new(false))).map_err(|source| {
+        RuntimeError::RegisterSignalHandler {
+            signal: "SIGCHLD",
+            source,
+        }
+    })?;
 
     Ok(())
 }
