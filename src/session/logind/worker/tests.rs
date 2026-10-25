@@ -305,3 +305,30 @@ fn startup_failure_keeps_the_typed_error_and_skips_later_initialization() {
         assert_eq!(state(&shared).calls, ["list", "delay"]);
     });
 }
+
+#[test]
+#[ignore = "requires a private D-Bus session"]
+fn unanswered_logind_call_times_out_with_a_typed_error() {
+    async_io::block_on(async {
+        let shared = Arc::new(Mutex::new(State {
+            ignore_idle_hint: true,
+            ..State::default()
+        }));
+        let _service = service(&shared).await;
+        let features = LogindFeatures {
+            sleep_events: false,
+            delay_inhibitor: false,
+            session_events: false,
+            idle_inhibitors: false,
+            idle_hint: true,
+        };
+        let builder = zbus::connection::Builder::session()
+            .unwrap_or_else(|error| panic!("failed to configure worker bus: {error}"));
+
+        let result = LogindWorker::connect(builder, Duration::from_millis(100), features).await;
+
+        assert!(matches!(result, Err(SessionError::SetIdleHint(source))
+            if matches!(&*source, zbus::Error::InputOutput(error) if error.kind() == io::ErrorKind::TimedOut)));
+        assert_eq!(state(&shared).calls, ["hint"]);
+    });
+}

@@ -22,6 +22,7 @@ pub(super) struct State {
     pub preparing: bool,
     pub inhibitors: Vec<LogindInhibitor>,
     pub fail_inhibit: bool,
+    pub ignore_idle_hint: bool,
 }
 
 pub(super) type SharedState = Arc<Mutex<State>>;
@@ -108,9 +109,15 @@ struct Session(SharedState);
 
 #[zbus::interface(name = "org.freedesktop.login1.Session")]
 impl Session {
-    fn set_idle_hint(&self, idle: bool) {
-        let mut state = state(&self.0);
-        state.calls.push("hint");
-        state.hints.push(idle);
+    async fn set_idle_hint(&self, idle: bool) {
+        let ignore = {
+            let mut state = state(&self.0);
+            state.calls.push("hint");
+            state.hints.push(idle);
+            state.ignore_idle_hint
+        };
+        if ignore {
+            std::future::pending::<()>().await;
+        }
     }
 }

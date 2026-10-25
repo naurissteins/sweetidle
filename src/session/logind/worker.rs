@@ -1,10 +1,11 @@
-use std::{future::pending, ops::ControlFlow, sync::mpsc::SyncSender};
+use std::{future::pending, ops::ControlFlow, sync::mpsc::SyncSender, time::Duration};
 
 use async_channel::Receiver;
 use calloop::channel::Sender as EventSender;
 use futures_lite::{StreamExt, future};
 use zbus::{
     Connection, Message,
+    connection::Builder,
     proxy::{PropertyStream, SignalStream},
 };
 
@@ -17,6 +18,9 @@ use super::{
     signals,
 };
 use crate::session::SystemdIdleInhibitor;
+
+// matches the libdbus and sd-bus default reply timeout
+const METHOD_TIMEOUT: Duration = Duration::from_secs(25);
 
 pub(super) struct LogindWorker {
     sleep_signals: Option<PrepareForSleepStream>,
@@ -33,7 +37,20 @@ pub(super) struct LogindWorker {
 impl LogindWorker {
     pub(super) async fn open(features: LogindFeatures) -> Result<Self, SessionError> {
         // dbus work stays off the Wayland event loop
-        let connection = Connection::system()
+        let builder =
+            Builder::system().map_err(|source| SessionError::Connect(Box::new(source)))?;
+        Self::connect(builder, METHOD_TIMEOUT, features).await
+    }
+
+    async fn connect(
+        builder: Builder<'_>,
+        method_timeout: Duration,
+        features: LogindFeatures,
+    ) -> Result<Self, SessionError> {
+        // an unanswered call would otherwise stall startup, sleep, and lock handling forever
+        let connection = builder
+            .method_timeout(method_timeout)
+            .build()
             .await
             .map_err(|source| SessionError::Connect(Box::new(source)))?;
         Self::from_connection(connection, features).await
