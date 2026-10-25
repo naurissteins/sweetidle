@@ -46,13 +46,13 @@ pub enum ProcessError {
 
 impl ProcessAdapter {
     pub fn spawn(&mut self, request: &SpawnRequest) -> Result<ProcessStart, ProcessError> {
-        // hooks must not read the daemon's stdin or write into its terminal and logs
+        // hooks must not read the daemon's stdin; stderr is inherited so hook failures reach the journal
         let child = Command::new("sh")
             .arg("-c")
             .arg(&request.command)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             // keep terminal interrupts from reaching running lockers and helpers
             .process_group(0)
             .spawn()

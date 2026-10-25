@@ -24,7 +24,10 @@ Use another config with `--config`:
 ## Configuration examples
 
 Config is TOML, UTF-8, and at most 1 MiB. Commands run through `sh -c` in their
-own process group, so stopping sweetidle leaves them running.
+own process group, so stopping sweetidle leaves them running. Their stdout is
+discarded and their stderr goes to sweetidle's stderr, which is the journal
+under the systemd unit. Use `journalctl --user --unit=sweetidle.service` to see
+why a hook failed.
 
 The default path needs an absolute `HOME`. Use `--config <PATH>` to avoid that.
 

@@ -85,6 +85,10 @@ The file is UTF-8 TOML, at most 1 MiB, and unknown fields are rejected.
 Timeouts are seconds from 1 to 4294967.
 Commands must not be empty and run through
 .BR "sh -c" .
+Their standard input and output are
+.IR /dev/null ;
+their standard error is inherited from
+.BR sweetidle .
 .PP
 The optional
 .B [general]

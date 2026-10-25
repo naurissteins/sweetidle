@@ -410,6 +410,33 @@ fn second_instance_fails_before_connecting_to_the_compositor() -> Result<(), Box
     Ok(())
 }
 
+#[test]
+#[ignore = "runs the real daemon against a private Wayland compositor"]
+fn hook_stderr_reaches_the_daemon_log_but_stdout_does_not() -> Result<(), Box<dyn Error>> {
+    let mut harness = ReloadHarness::start("initial")?;
+    harness.wait_for_markers(1)?;
+    harness.resume_listener_cycle()?;
+    let marker_path = shell_quote(path_text(&harness.marker_path)?);
+    let command = format!(
+        "printf 'hook-stdout\\n'; printf 'hook-stderr\\n' >&2; printf 'done\\n' >> {marker_path}"
+    );
+    fs::write(
+        &harness.config_path,
+        format!(
+            "[general]\nignore_dbus_inhibit = true\nignore_systemd_inhibit = true\n\n[[listener]]\ntimeout = 3600\non_timeout = \"{command}\"\nignore_inhibit = true\n"
+        ),
+    )?;
+    harness.signal_reload()?;
+    harness.wait_for_markers(2)?;
+    harness.wait_for_log_count("command finished", 2)?;
+
+    let log = fs::read_to_string(&harness.log_path)?;
+    assert!(log.contains("hook-stderr\n"), "{log}");
+    assert!(!log.contains("hook-stdout"), "{log}");
+    harness.stop()?;
+    Ok(())
+}
+
 struct ReloadHarness {
     config_path: std::path::PathBuf,
     marker_path: std::path::PathBuf,
