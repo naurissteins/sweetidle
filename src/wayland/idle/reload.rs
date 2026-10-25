@@ -18,8 +18,6 @@ impl IdleWaylandState {
         let requests = notification_requests(listeners, idle_hint_timeout);
         validate_requests(&requests, self.notifier.as_ref().map(Proxy::version))?;
 
-        self.configuration_generation = self.configuration_generation.wrapping_add(1);
-        self.inhibition_generation = self.inhibition_generation.wrapping_add(1);
         self.events = self
             .events
             .drain(..)
@@ -55,14 +53,8 @@ impl IdleWaylandState {
                 .iter()
                 .any(|(_, next)| request.target == IdleNotificationTarget::Listener(*next))
         });
-        self.notifications.extend(create_notifications(
-            notifier,
-            seat,
-            queue_handle,
-            fresh,
-            self.configuration_generation,
-            self.inhibition_generation,
-        )?);
+        self.notifications
+            .extend(create_notifications(notifier, seat, queue_handle, fresh)?);
         Ok(())
     }
 }

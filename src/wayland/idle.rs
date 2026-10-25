@@ -42,7 +42,7 @@ impl IdleWaylandParts {
         let seat = bind_first_seat(&globals, &queue_handle)?;
         let requests = notification_requests(requests, idle_hint_timeout);
         validate_requests(&requests, Some(notifier.version()))?;
-        let notifications = create_notifications(&notifier, &seat, &queue_handle, &requests, 0, 0)?;
+        let notifications = create_notifications(&notifier, &seat, &queue_handle, &requests)?;
 
         connection.flush().map_err(IdleWaylandError::Flush)?;
 
@@ -138,8 +138,6 @@ impl Error for IdleWaylandError {
 #[derive(Debug, Default)]
 pub(crate) struct IdleWaylandState {
     events: Vec<IdleEvent>,
-    configuration_generation: u64,
-    inhibition_generation: u64,
     notifier: Option<ExtIdleNotifierV1>,
     seat: Option<wl_seat::WlSeat>,
     queue_handle: Option<QueueHandle<Self>>,
@@ -157,8 +155,6 @@ impl IdleWaylandState {
     ) -> Self {
         Self {
             events: Vec::new(),
-            configuration_generation: 0,
-            inhibition_generation: 0,
             notifier: Some(notifier),
             seat: Some(seat),
             queue_handle: Some(queue_handle),
@@ -175,26 +171,15 @@ impl IdleWaylandState {
         std::mem::take(&mut self.events)
     }
 
-    fn accepts_generation(&self, data: &IdleNotificationData) -> bool {
-        // destroyed proxies can still leave queued events behind
-        data.configuration_generation == self.configuration_generation
-            // opted-out notifications survive inhibitor resets with their original generation
-            && (data.inhibit_policy == InhibitPolicy::Ignore
-                || data.inhibition_generation == self.inhibition_generation)
-    }
-
-    fn event_target(&self, data: &IdleNotificationData) -> Option<IdleNotificationTarget> {
-        // retained proxies still carry their creation-time id and generations after a reload
+    fn event_target(&self, proxy: &ExtIdleNotificationV1) -> Option<IdleNotificationTarget> {
+        // only live notifications route events, and retained ones carry their remapped target
         self.notifications
             .iter()
-            .find(|notification| notification.data == *data)
+            .find(|notification| notification.proxy == *proxy)
             .map(|notification| notification.target)
-            .or_else(|| self.accepts_generation(data).then_some(data.target))
     }
 
     pub(crate) fn reset_notifications(&mut self) -> Result<(), IdleWaylandError> {
-        self.configuration_generation = self.configuration_generation.wrapping_add(1);
-        self.inhibition_generation = self.inhibition_generation.wrapping_add(1);
         self.events.clear();
         for notification in self.notifications.drain(..) {
             notification.proxy.destroy();
@@ -207,21 +192,12 @@ impl IdleWaylandState {
         ) else {
             return Ok(());
         };
-        self.notifications = create_notifications(
-            notifier,
-            seat,
-            queue_handle,
-            &self.requests,
-            self.configuration_generation,
-            self.inhibition_generation,
-        )?;
+        self.notifications = create_notifications(notifier, seat, queue_handle, &self.requests)?;
 
         Ok(())
     }
 
     pub(crate) fn pause_notifications(&mut self) {
-        self.configuration_generation = self.configuration_generation.wrapping_add(1);
-        self.inhibition_generation = self.inhibition_generation.wrapping_add(1);
         self.events.clear();
         for notification in self.notifications.drain(..) {
             notification.proxy.destroy();
@@ -230,14 +206,13 @@ impl IdleWaylandState {
 
     pub(crate) fn reset_inhibited_notifications(&mut self) -> Result<(), IdleWaylandError> {
         // listeners that ignore inhibitors keep their current notifications
-        self.inhibition_generation = self.inhibition_generation.wrapping_add(1);
         // queued respecting events belong to the idle cycle that this reset invalidates
         self.events
             .retain(|event| event_ignores_inhibitors(&self.requests, event));
 
         let mut ignored = Vec::new();
         for notification in self.notifications.drain(..) {
-            if notification.data.inhibit_policy == InhibitPolicy::Respect {
+            if notification.inhibit_policy == InhibitPolicy::Respect {
                 notification.proxy.destroy();
             } else {
                 ignored.push(notification);
@@ -261,8 +236,6 @@ impl IdleWaylandState {
             seat,
             queue_handle,
             respecting,
-            self.configuration_generation,
-            self.inhibition_generation,
         )?);
 
         Ok(())
@@ -322,32 +295,24 @@ fn create_notifications<'a>(
     seat: &wl_seat::WlSeat,
     queue_handle: &QueueHandle<IdleWaylandState>,
     requests: impl IntoIterator<Item = &'a IdleNotificationRequest>,
-    configuration_generation: u64,
-    inhibition_generation: u64,
 ) -> Result<Vec<ActiveNotification>, IdleWaylandError> {
     requests
         .into_iter()
         .map(|request| {
             let timeout = timeout_millis(request)?;
-            let data = IdleNotificationData {
-                target: request.target,
-                inhibit_policy: request.inhibit_policy,
-                configuration_generation,
-                inhibition_generation,
-            };
             let proxy = match request.inhibit_policy {
                 InhibitPolicy::Respect => {
-                    notifier.get_idle_notification(timeout, seat, queue_handle, data)
+                    notifier.get_idle_notification(timeout, seat, queue_handle, ())
                 }
                 InhibitPolicy::Ignore => {
                     ensure_input_idle_supported(request, notifier.version())?;
-                    notifier.get_input_idle_notification(timeout, seat, queue_handle, data)
+                    notifier.get_input_idle_notification(timeout, seat, queue_handle, ())
                 }
             };
             Ok(ActiveNotification {
                 proxy,
-                data,
                 target: request.target,
+                inhibit_policy: request.inhibit_policy,
             })
         })
         .collect()
@@ -435,8 +400,8 @@ struct IdleNotificationRequest {
 #[derive(Debug)]
 struct ActiveNotification {
     proxy: ExtIdleNotificationV1,
-    data: IdleNotificationData,
     target: IdleNotificationTarget,
+    inhibit_policy: InhibitPolicy,
 }
 
 fn event_ignores_inhibitors(requests: &[IdleNotificationRequest], event: &IdleEvent) -> bool {
@@ -475,24 +440,16 @@ impl Dispatch<ExtIdleNotifierV1, ()> for IdleWaylandState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct IdleNotificationData {
-    target: IdleNotificationTarget,
-    inhibit_policy: InhibitPolicy,
-    configuration_generation: u64,
-    inhibition_generation: u64,
-}
-
-impl Dispatch<ExtIdleNotificationV1, IdleNotificationData> for IdleWaylandState {
+impl Dispatch<ExtIdleNotificationV1, ()> for IdleWaylandState {
     fn event(
         state: &mut Self,
-        _proxy: &ExtIdleNotificationV1,
+        proxy: &ExtIdleNotificationV1,
         event: ext_idle_notification_v1::Event,
-        data: &IdleNotificationData,
+        _data: &(),
         _connection: &Connection,
         _queue_handle: &QueueHandle<Self>,
     ) {
-        let Some(target) = state.event_target(data) else {
+        let Some(target) = state.event_target(proxy) else {
             return;
         };
 
@@ -643,21 +600,6 @@ mod tests {
             state.take_events(),
             [IdleEvent::Idled(second), IdleEvent::Resumed(second)]
         );
-        assert!(!state.accepts_generation(&notification_data(0, 0, InhibitPolicy::Ignore)));
-    }
-
-    #[test]
-    fn rejects_callbacks_from_replaced_notification_generations() {
-        let state = IdleWaylandState {
-            configuration_generation: 3,
-            inhibition_generation: 5,
-            ..IdleWaylandState::default()
-        };
-
-        assert!(!state.accepts_generation(&notification_data(2, 5, InhibitPolicy::Respect)));
-        assert!(!state.accepts_generation(&notification_data(3, 4, InhibitPolicy::Respect)));
-        assert!(state.accepts_generation(&notification_data(3, 5, InhibitPolicy::Respect)));
-        assert!(state.accepts_generation(&notification_data(3, 4, InhibitPolicy::Ignore)));
     }
 
     #[test]
@@ -725,19 +667,16 @@ mod tests {
     }
 
     #[test]
-    fn pausing_discards_pending_events_and_rejects_old_callbacks() {
+    fn pausing_discards_pending_events() {
         let listener_id = ListenerId::from_index(0);
         let mut state = IdleWaylandState {
             events: vec![IdleEvent::Idled(listener_id)],
-            configuration_generation: 2,
-            inhibition_generation: 4,
             ..IdleWaylandState::default()
         };
 
         state.pause_notifications();
 
         assert!(state.take_events().is_empty());
-        assert!(!state.accepts_generation(&notification_data(2, 4, InhibitPolicy::Respect)));
     }
 
     fn request(listener_index: usize, timeout_seconds: u64) -> TimeoutRequest {
@@ -768,19 +707,6 @@ mod tests {
             target: IdleNotificationTarget::Listener(ListenerId::from_index(listener_index)),
             timeout: Duration::from_secs(timeout_seconds),
             inhibit_policy: InhibitPolicy::Respect,
-        }
-    }
-
-    fn notification_data(
-        configuration_generation: u64,
-        inhibition_generation: u64,
-        inhibit_policy: InhibitPolicy,
-    ) -> super::IdleNotificationData {
-        super::IdleNotificationData {
-            target: IdleNotificationTarget::Listener(ListenerId::from_index(0)),
-            inhibit_policy,
-            configuration_generation,
-            inhibition_generation,
         }
     }
 }
