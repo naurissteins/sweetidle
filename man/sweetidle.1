@@ -240,10 +240,11 @@ Don't also start sweetidle from your compositor config.
 .SH EXIT STATUS
 .B sweetidle
 returns 0 on success and 2 on any error.
-When the compositor closes the Wayland connection, for example at logout,
+This includes the compositor closing the Wayland connection, which
 .B sweetidle
-stops normally and returns 0.
-A Wayland protocol error still returns 2.
+reports as
+.IR "compositor closed the Wayland connection" ,
+so a service manager can restart it after a compositor crash.
 .SH EXAMPLES
 Validate an explicit configuration:
 .PP

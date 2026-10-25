@@ -39,7 +39,6 @@ pub enum InhibitorChange {
 #[derive(Debug)]
 pub enum RuntimeEvent {
     ShutdownRequested(ShutdownSignal),
-    CompositorDisconnected,
     ConfigReloadRequested,
     ConfigReloadReady(Config),
     ConfigReloadRejected(ConfigLoadError),
@@ -147,13 +146,12 @@ impl IdleRuntime {
         timeout: Option<Duration>,
     ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
         if let Err(error) = self.event_loop.dispatch(timeout, &mut self.state) {
-            if !self.compositor_hung_up() {
-                return Err(RuntimeError::Dispatch(error));
-            }
-            self.state.discard_pending_events();
-            let mut events = self.state.take_runtime_events();
-            events.push(RuntimeEvent::CompositorDisconnected);
-            return Ok(events);
+            // still a failure, so Restart=on-failure recovers after a compositor crash
+            return Err(if self.compositor_hung_up() {
+                RuntimeError::CompositorDisconnected
+            } else {
+                RuntimeError::Dispatch(error)
+            });
         }
         // release completed command slots before routing events that may reuse them
         self.state.collect_ready_processes()?;

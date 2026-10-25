@@ -41,6 +41,7 @@ pub enum RuntimeError {
         source: calloop::Error,
     },
     Dispatch(calloop::Error),
+    CompositorDisconnected,
     Listener(ListenerError),
     Process(ProcessError),
     CommandDispatch(CommandDispatchError),
@@ -131,6 +132,9 @@ impl fmt::Display for RuntimeError {
                 )
             }
             Self::Dispatch(source) => write!(formatter, "event loop dispatch failed: {source}"),
+            Self::CompositorDisconnected => {
+                write!(formatter, "compositor closed the Wayland connection")
+            }
             Self::Listener(ListenerError::UnknownListener(listener_id)) => {
                 display_unknown_listener(formatter, *listener_id)
             }
@@ -202,6 +206,7 @@ impl Error for RuntimeError {
             | Self::IdleHintMonitorMissing
             | Self::DbusInhibitChannelClosed
             | Self::ControlChannelClosed
+            | Self::CompositorDisconnected
             | Self::InvalidProcessId(_)
             | Self::ProcessNotReady(_) => None,
         }
