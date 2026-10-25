@@ -147,12 +147,7 @@ impl IdleRuntime {
             return Ok(self.state.take_runtime_events());
         }
 
-        // apply D-Bus and systemd inhibition before Wayland events from the same wakeup
-        self.state.route_dbus_inhibit_events()?;
-        self.state.route_reload_events()?;
-        self.state.route_session_events()?;
-        self.state.route_wayland_events()?;
-        self.state.route_control_events()?;
+        self.state.route_pending()?;
         self.flush_idle_hint_updates()?;
         // dispatch only after routing so pause and sleep-resume cleanup can affect queued intents
         self.state

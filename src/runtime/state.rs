@@ -81,7 +81,16 @@ impl RuntimeState {
         }
     }
 
-    pub(super) fn route_wayland_events(&mut self) -> Result<(), RuntimeError> {
+    pub(super) fn route_pending(&mut self) -> Result<(), RuntimeError> {
+        // inhibitors apply before same-wakeup idle events, and status sees both
+        self.route_dbus_inhibit_events()?;
+        self.route_reload_events()?;
+        self.route_session_events()?;
+        self.route_wayland_events()?;
+        self.route_control_events()
+    }
+
+    fn route_wayland_events(&mut self) -> Result<(), RuntimeError> {
         if self.paused {
             self.wayland.take_events();
             return Ok(());
@@ -192,7 +201,7 @@ impl RuntimeState {
         self.reload_channel_closed = true;
     }
 
-    pub(super) fn route_reload_events(&mut self) -> Result<(), RuntimeError> {
+    fn route_reload_events(&mut self) -> Result<(), RuntimeError> {
         for event in std::mem::take(&mut self.reload_events) {
             self.reload_pending = false;
             match event {
@@ -240,7 +249,7 @@ impl RuntimeState {
         self.control_channel_closed = true;
     }
 
-    pub(super) fn route_control_events(&mut self) -> Result<(), RuntimeError> {
+    fn route_control_events(&mut self) -> Result<(), RuntimeError> {
         for event in std::mem::take(&mut self.control_events) {
             match event {
                 ControlEvent::Status { request, format } => {
@@ -298,7 +307,7 @@ impl RuntimeState {
         Ok(())
     }
 
-    pub(super) fn route_dbus_inhibit_events(&mut self) -> Result<(), RuntimeError> {
+    fn route_dbus_inhibit_events(&mut self) -> Result<(), RuntimeError> {
         for event in std::mem::take(&mut self.dbus_inhibit_events) {
             let transition = self.inhibition.apply_dbus(&event);
             self.apply_idle_inhibition_transition(transition)?;
@@ -345,7 +354,7 @@ impl RuntimeState {
         Ok(())
     }
 
-    pub(super) fn route_session_events(&mut self) -> Result<(), RuntimeError> {
+    fn route_session_events(&mut self) -> Result<(), RuntimeError> {
         for event in std::mem::take(&mut self.session_events) {
             match event {
                 SessionEvent::PrepareForSleep(inhibitor) => {
@@ -634,7 +643,7 @@ mod tests {
     use crate::{
         command::{CommandContext, DispatchDecision},
         config::{Config, GeneralConfig, ListenerConfig},
-        control::{ControlEvent, ControlRequest},
+        control::{ControlEvent, ControlRequest, StatusFormat},
         listener::{
             CommandIntent, CommandKind, ListenerError, ListenerId, ListenerPhase, ListenerSet,
         },
@@ -2017,6 +2026,65 @@ mod tests {
         ));
         let _ = wait_for_process_events(&mut event_loop, &mut state);
         assert!(state.commands.is_empty());
+    }
+
+    #[test]
+    fn same_wakeup_dbus_inhibitor_suppresses_a_respecting_timeout() {
+        let mut state = runtime_state();
+        state
+            .wayland
+            .record(IdleEvent::Idled(ListenerId::from_index(0)));
+        state.record_dbus_inhibit_event(DbusInhibitEvent::Added {
+            inhibitor: inhibitor_info(1),
+            active_count: 1,
+        });
+
+        assert_runtime_ok(state.route_pending());
+
+        assert!(state.command_intents.is_empty());
+        assert_eq!(
+            state.status_snapshot().listeners[0].phase,
+            ListenerPhase::Armed
+        );
+    }
+
+    #[test]
+    fn same_wakeup_systemd_inhibitor_suppresses_a_respecting_timeout() {
+        let mut state = runtime_state();
+        state
+            .wayland
+            .record(IdleEvent::Idled(ListenerId::from_index(0)));
+        state.record_session_event(SessionEvent::SystemdIdleInhibitorsChanged(vec![
+            systemd_inhibitor(42),
+        ]));
+
+        assert_runtime_ok(state.route_pending());
+
+        assert!(state.command_intents.is_empty());
+        assert_eq!(
+            state.status_snapshot().listeners[0].phase,
+            ListenerPhase::Armed
+        );
+    }
+
+    #[test]
+    fn status_reflects_wayland_events_from_the_same_wakeup() {
+        let mut state = runtime_state();
+        state
+            .wayland
+            .record(IdleEvent::Idled(ListenerId::from_index(0)));
+        let (reply, response) = mpsc::sync_channel(1);
+        state.record_control_event(ControlEvent::Status {
+            request: ControlRequest::new(reply),
+            format: StatusFormat::Text,
+        });
+
+        assert_runtime_ok(state.route_pending());
+
+        let status = response
+            .recv()
+            .unwrap_or_else(|error| panic!("status reply missing: {error}"));
+        assert!(status.contains("state=timed-out"), "{status}");
     }
 
     fn runtime_state() -> RuntimeState {
