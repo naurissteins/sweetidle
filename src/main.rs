@@ -1,7 +1,7 @@
 mod cli;
 mod event_log;
 
-use std::path::PathBuf;
+use std::{ffi::OsString, path::PathBuf};
 
 use sweetidle::{
     config::Config,
@@ -16,13 +16,13 @@ use self::{
 };
 
 fn main() {
-    if let Err(error) = run(std::env::args().skip(1)) {
+    if let Err(error) = run(std::env::args_os().skip(1)) {
         eprintln!("error: {error}");
         std::process::exit(2);
     }
 }
 
-fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
+fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
     match parse_args(args)? {
         Action::Help => print_help(),
         Action::Version => println!("sweetidle {VERSION}"),

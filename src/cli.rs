@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{ffi::OsString, path::PathBuf};
 
 pub(super) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -23,34 +23,42 @@ pub(super) enum StatusOutput {
     Json,
 }
 
-pub(super) fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Action, String> {
+pub(super) fn parse_args(
+    args: impl IntoIterator<Item = impl Into<OsString>>,
+) -> Result<Action, String> {
     let mut check_config = false;
     let mut config_path = None;
     let mut verbose = false;
     let mut status_json = false;
     let mut control_action = None;
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().map(Into::into);
 
+    // paths may be any bytes, so only flags need to be UTF-8
     while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-h" | "--help" => return Ok(Action::Help),
-            "-V" | "--version" => return Ok(Action::Version),
-            "-v" | "--verbose" => verbose = true,
-            "status" => {
+        match arg.to_str() {
+            Some("-h" | "--help") => return Ok(Action::Help),
+            Some("-V" | "--version") => return Ok(Action::Version),
+            Some("-v" | "--verbose") => verbose = true,
+            Some("status") => {
                 set_control_action(&mut control_action, Action::Status(StatusOutput::Text))?
             }
-            "pause" => set_control_action(&mut control_action, Action::Pause)?,
-            "resume" => set_control_action(&mut control_action, Action::Resume)?,
-            "reload" => set_control_action(&mut control_action, Action::Reload)?,
-            "--json" => status_json = true,
-            "--check-config" => check_config = true,
-            "-c" | "--config" => {
+            Some("pause") => set_control_action(&mut control_action, Action::Pause)?,
+            Some("resume") => set_control_action(&mut control_action, Action::Resume)?,
+            Some("reload") => set_control_action(&mut control_action, Action::Reload)?,
+            Some("--json") => status_json = true,
+            Some("--check-config") => check_config = true,
+            Some(flag @ ("-c" | "--config")) => {
                 let path = args
                     .next()
-                    .ok_or_else(|| format!("`{arg}` requires a path argument"))?;
+                    .ok_or_else(|| format!("`{flag}` requires a path argument"))?;
                 config_path = Some(PathBuf::from(path));
             }
-            _ => return Err(format!("unknown argument `{arg}`\ntry `sweetidle --help`")),
+            _ => {
+                return Err(format!(
+                    "unknown argument `{}`\ntry `sweetidle --help`",
+                    arg.to_string_lossy()
+                ));
+            }
         }
     }
 
@@ -126,7 +134,7 @@ mod tests {
     #[test]
     fn no_arguments_runs_with_the_default_config() {
         assert_eq!(
-            parse_args(Vec::new()),
+            parse_args(Vec::<String>::new()),
             Ok(Action::Run {
                 path: None,
                 verbose: false,
