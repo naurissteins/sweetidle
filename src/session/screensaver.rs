@@ -277,8 +277,8 @@ async fn worker_loop(
             );
         }
     };
-    // subscribe before owning the name to observe early client exits
-    let mut owner_changes = match bus.receive_name_owner_changed().await {
+    // subscribe to disconnects (empty new owner) before owning the name to see early client exits
+    let mut owner_changes = match bus.receive_name_owner_changed_with_args(&[(2, "")]).await {
         Ok(stream) => stream,
         Err(source) => {
             return report_initialization_error(
