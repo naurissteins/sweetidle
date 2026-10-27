@@ -5,7 +5,7 @@
 lock_command = "veila lock --wait-ready"
 # Set this when the locker exposes a safe external unlock command.
 # unlock_command = "your-locker-control unlock"
-before_sleep_command = "veila lock --wait-ready"
+# before_sleep_command = "veila lock --wait-ready"
 after_resume_command = "sweets msg output-power '*' on"
 wait_before_sleep = true
 ignore_dbus_inhibit = false
