@@ -1,10 +1,14 @@
 mod cli;
 mod event_log;
 
-use std::{ffi::OsString, path::PathBuf};
+use std::{
+    ffi::OsString,
+    io,
+    path::{Path, PathBuf},
+};
 
 use sweetidle::{
-    config::Config,
+    config::{Config, ConfigLoadError},
     control,
     runtime::{ConfigReloadOutcome, IdleRuntime},
 };
@@ -141,9 +145,40 @@ fn load_config(path: Option<PathBuf>) -> Result<LoadedConfig, String> {
         Some(path) => path,
         None => default_config_path()?,
     };
-    let config = Config::load(&path).map_err(|error| error.to_string())?;
+    let config = Config::load(&path).map_err(|error| match &error {
+        ConfigLoadError::Read { source, .. } if source.kind() == io::ErrorKind::NotFound => {
+            format!("{error}\n{}", missing_config_hint(&path))
+        }
+        _ => error.to_string(),
+    })?;
 
     Ok(LoadedConfig { path, config })
+}
+
+fn missing_config_hint(path: &Path) -> String {
+    // packaged builds ship the example under share/doc next to bin
+    let example = std::env::current_exe()
+        .ok()
+        .and_then(|exe| {
+            Some(
+                exe.parent()?
+                    .parent()?
+                    .join("share/doc/sweetidle/example.toml"),
+            )
+        })
+        .filter(|example| example.is_file());
+    let Some(example) = example else {
+        return format!(
+            "hint: copy config/example.toml from the sweetidle source to `{}`",
+            path.display()
+        );
+    };
+    // install makes the parent directory and drops the read-only nix store mode
+    format!(
+        "hint: start from the example config:\n  install -Dm644 '{}' '{}'",
+        example.display(),
+        path.display()
+    )
 }
 
 fn default_config_path() -> Result<PathBuf, String> {
