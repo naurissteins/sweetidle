@@ -211,7 +211,8 @@ Wayland display to connect to.
 .TP
 .B XDG_SESSION_ID
 Logind session to use.
-If unset, the session is looked up by process ID.
+If unset, logind picks the caller's session or, for a systemd user service,
+the user's graphical display session.
 .SH FILES
 .TP
 .I ~/.config/sweetidle/config.toml

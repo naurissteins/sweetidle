@@ -66,10 +66,6 @@ impl Manager {
         OwnedObjectPath::try_from(PATH).unwrap_or_else(|error| panic!("invalid test path: {error}"))
     }
 
-    fn get_session_by_pid(&self, _pid: u32) -> OwnedObjectPath {
-        self.get_session("")
-    }
-
     fn list_inhibitors(&self) -> Vec<LogindInhibitor> {
         let mut state = state(&self.0);
         state.calls.push("list");
