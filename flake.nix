@@ -1,12 +1,26 @@
 {
-  description = "sweetidle development environment";
+  description = "sweetidle - Wayland idle management daemon";
 
   inputs.nixpkgs.url = "https://channels.nixos.org/nixos-26.05/nixexprs.tar.zst";
 
-  outputs = {nixpkgs, ...}: let
+  outputs = {
+    self,
+    nixpkgs,
+  }: let
     systems = ["x86_64-linux" "aarch64-linux"];
     forEachSystem = nixpkgs.lib.genAttrs systems;
   in {
+    packages = forEachSystem (system: rec {
+      sweetidle = nixpkgs.legacyPackages.${system}.callPackage ./nix/package.nix {};
+      default = sweetidle;
+    });
+
+    overlays.default = final: _prev: {
+      sweetidle = final.callPackage ./nix/package.nix {};
+    };
+
+    nixosModules.default = ./nix/module.nix;
+
     devShells = forEachSystem (system: let
       pkgs = nixpkgs.legacyPackages.${system};
     in {
