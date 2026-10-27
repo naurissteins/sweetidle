@@ -31,6 +31,9 @@ why a hook failed.
 
 The default path needs an absolute `HOME`. Use `--config <PATH>` to avoid that.
 
+The config file is required. If it is missing, sweetidle exits and prints the
+command to copy the example config into place.
+
 ### Lock after five minutes
 
 ```toml

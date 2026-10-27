@@ -78,6 +78,24 @@ fn absolute_home_loads_the_default_config() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn missing_config_suggests_the_example() -> Result<(), Box<dyn Error>> {
+    let home = tempfile::tempdir()?;
+    let output = Command::new(env!("CARGO_BIN_EXE_sweetidle"))
+        .arg("--check-config")
+        .env("HOME", home.path())
+        .output()?;
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("No such file or directory"), "{stderr}");
+    assert!(
+        stderr.contains("hint: copy config/example.toml"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
 fn explicit_relative_config_does_not_require_valid_home() -> Result<(), Box<dyn Error>> {
     let directory = config_home()?;
     for home in [None, Some(""), Some("relative")] {
