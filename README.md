@@ -179,8 +179,70 @@ On a normal logout, systemd stops sweetidle with the session. If the compositor
 crashes instead, sweetidle exits with `error: compositor closed the Wayland
 connection` and systemd restarts it once the next compositor is up.
 
-NixOS has no package or service module yet. Run the local build from a Wayland
-terminal instead.
+## NixOS
+
+The flake provides `packages.<system>.sweetidle`, `overlays.default`, and a
+NixOS module at `nixosModules.default`. Add it to your system flake:
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "nixpkgs/nixos-26.05";
+    sweetidle = {
+      url = "github:naurissteins/sweetidle";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
+  outputs = {nixpkgs, sweetidle, ...}: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        ./configuration.nix
+        sweetidle.nixosModules.default
+      ];
+    };
+  };
+}
+```
+
+Then enable the service in your configuration:
+
+```nix
+services.sweetidle = {
+  enable = true;
+  settings = {
+    general.before_sleep_command = "veila lock --wait-ready";
+    listener = [
+      { timeout = 300; on_timeout = "veila lock --wait-ready"; }
+      {
+        timeout = 600;
+        on_timeout = "sweet smsg output '*' power off";
+        on_resume = "sweets msg output '*' power on";
+      }
+    ];
+  };
+};
+```
+
+| Option | Default | Purpose |
+|---|---|---|
+| `enable` | `false` | Install sweetidle and start `sweetidle.service` with `graphical-session.target` for every user |
+| `package` | built from this flake | The sweetidle package |
+| `settings` | `{}` | Config written as TOML to `/etc/sweetidle/config.toml` |
+
+`settings` uses the same keys as the [configuration reference](#configuration-reference)
+and is checked with `sweetidle --check-config` at build time, so a bad config
+fails the rebuild. When `settings` is set, the service ignores
+`~/.config/sweetidle/config.toml`. Leave it empty to manage that file yourself.
+
+Hooks see the user manager's `PATH`, which on NixOS includes system and
+per-user packages, so commands such as `sweetslock` are found by name.
+
+After a rebuild that changes `settings`, apply it with
+`systemctl --user reload sweetidle.service`. A new sweetidle version needs
+`systemctl --user restart sweetidle.service`. After the first install, log out
+and back in, or run `systemctl --user start sweetidle.service`.
 
 ## Command-line help
 
