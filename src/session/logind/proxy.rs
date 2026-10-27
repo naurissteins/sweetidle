@@ -15,8 +15,6 @@ use crate::session::{LogindInhibitor, SystemdIdleInhibitor, idle_block_inhibitor
 pub(super) trait LogindManager {
     fn get_session(&self, session_id: &str) -> zbus::Result<OwnedObjectPath>;
 
-    fn get_session_by_pid(&self, pid: u32) -> zbus::Result<OwnedObjectPath>;
-
     fn inhibit(&self, what: &str, who: &str, why: &str, mode: &str) -> zbus::Result<OwnedFd>;
 
     fn list_inhibitors(&self) -> zbus::Result<Vec<LogindInhibitor>>;
@@ -67,12 +65,14 @@ pub(super) async fn resolve_session_path(
         }
     }
 
+    // "auto" falls back to the user's display session, which user services need
+    // because their processes belong to no session
     manager
-        .get_session_by_pid(std::process::id())
+        .get_session("auto")
         .await
-        .map_err(|by_process_id| SessionError::ResolveSession {
+        .map_err(|by_auto| SessionError::ResolveSession {
             by_session_id,
-            by_process_id: Box::new(by_process_id),
+            by_auto: Box::new(by_auto),
         })
 }
 

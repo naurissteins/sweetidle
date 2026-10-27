@@ -56,7 +56,7 @@ pub enum SessionError {
     CreateProxy(Box<zbus::Error>),
     ResolveSession {
         by_session_id: Option<Box<zbus::Error>>,
-        by_process_id: Box<zbus::Error>,
+        by_auto: Box<zbus::Error>,
     },
     CreateSessionProxy(Box<zbus::Error>),
     Subscribe(Box<zbus::Error>),
@@ -132,17 +132,17 @@ impl fmt::Display for SessionError {
             }
             Self::ResolveSession {
                 by_session_id: Some(by_session_id),
-                by_process_id,
+                by_auto,
             } => write!(
                 formatter,
-                "failed to resolve logind session from XDG_SESSION_ID ({by_session_id}) or process id ({by_process_id})"
+                "failed to resolve logind session from XDG_SESSION_ID ({by_session_id}) or the user's display session ({by_auto})"
             ),
             Self::ResolveSession {
                 by_session_id: None,
-                by_process_id,
+                by_auto,
             } => write!(
                 formatter,
-                "failed to resolve logind session from process id: {by_process_id}"
+                "failed to resolve the user's logind display session: {by_auto}"
             ),
             Self::CreateSessionProxy(source) => {
                 write!(formatter, "failed to create logind session proxy: {source}")
@@ -200,7 +200,7 @@ impl Error for SessionError {
             | Self::Inhibit(source)
             | Self::SetIdleHint(source)
             | Self::DecodeSignal(source) => Some(source.as_ref()),
-            Self::ResolveSession { by_process_id, .. } => Some(by_process_id.as_ref()),
+            Self::ResolveSession { by_auto, .. } => Some(by_auto.as_ref()),
             Self::WorkerInitializationStopped | Self::RequestChannelClosed | Self::Disconnected => {
                 None
             }
