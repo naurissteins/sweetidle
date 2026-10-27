@@ -177,6 +177,8 @@ The ScreenSaver service answers at
 .I /org/freedesktop/ScreenSaver
 and
 .IR /ScreenSaver .
+If another service already owns that name, as niri does, sweetidle leaves
+D-Bus inhibitors to it.
 .B status
 lists D-Bus and systemd inhibitors; compositor inhibitors are not visible to
 clients.

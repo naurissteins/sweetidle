@@ -152,6 +152,10 @@ impl RuntimeState {
             .collect_ready_processes(&mut self.runtime_events)
     }
 
+    pub(super) fn push_runtime_event(&mut self, event: RuntimeEvent) {
+        self.runtime_events.push(event);
+    }
+
     #[must_use = "drained runtime events must be handled"]
     pub(super) fn take_runtime_events(&mut self) -> Vec<RuntimeEvent> {
         std::mem::take(&mut self.runtime_events)
