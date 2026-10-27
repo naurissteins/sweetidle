@@ -33,8 +33,8 @@ in {
             { timeout = 300; on_timeout = "veila lock --wait-ready"; }
             {
               timeout = 600;
-              on_timeout = "sweets msg output '*' power off";
-              on_resume = "sweets msg output '*' power on";
+              on_timeout = "sweets msg output-power '*' off";
+              on_resume = "sweets msg output-power '*' on";
             }
           ];
         }

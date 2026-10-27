@@ -90,7 +90,7 @@ services.sweetidle = {
 
 Leave `settings` empty to use `~/.config/sweetidle/config.toml` instead.
 
-## ⚙️ Config
+## Config
 
 Config lives in `~/.config/sweetidle/config.toml`. Check it with:
 
@@ -142,7 +142,7 @@ ignore_systemd_inhibit = true
 
 See the full [example config](config/example.toml).
 
-## 🎮 Usage
+## Usage
 
 ```bash
 sweetidle status    # show daemon state
