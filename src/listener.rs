@@ -332,7 +332,7 @@ mod tests {
             Ok(Some(CommandIntent {
                 listener_id: ListenerId(0),
                 kind: CommandKind::Timeout,
-                command: "sweetslock".to_string()
+                command: "veila lock --wait-ready".to_string()
             }))
         );
         assert_eq!(set.mark_timed_out(ListenerId(0)), Ok(None));
@@ -344,7 +344,7 @@ mod tests {
             Ok(Some(CommandIntent {
                 listener_id: ListenerId(0),
                 kind: CommandKind::Timeout,
-                command: "sweetslock".to_string()
+                command: "veila lock --wait-ready".to_string()
             }))
         );
     }
@@ -359,7 +359,7 @@ mod tests {
             Ok(Some(CommandIntent {
                 listener_id: ListenerId(1),
                 kind: CommandKind::Timeout,
-                command: "sweetsmsg output '*' power off".to_string()
+                command: "sweets msg output-power '*' off".to_string()
             }))
         );
 
@@ -368,7 +368,7 @@ mod tests {
             Ok(Some(CommandIntent {
                 listener_id: ListenerId(1),
                 kind: CommandKind::Resume,
-                command: "sweetsmsg output '*' power on".to_string()
+                command: "sweets msg output-power '*' on".to_string()
             }))
         );
         assert_eq!(set.mark_resumed(ListenerId(1)), Ok(None));
@@ -447,7 +447,7 @@ mod tests {
             vec![CommandIntent {
                 listener_id: ListenerId(1),
                 kind: CommandKind::Resume,
-                command: "sweetsmsg output '*' power on".to_string(),
+                command: "sweets msg output-power '*' on".to_string(),
             }]
         );
         assert_eq!(
@@ -455,7 +455,7 @@ mod tests {
             Ok(Some(CommandIntent {
                 listener_id: ListenerId(1),
                 kind: CommandKind::Timeout,
-                command: "sweetsmsg output '*' power off".to_string(),
+                command: "sweets msg output-power '*' off".to_string(),
             }))
         );
         assert_eq!(set.mark_timed_out(ListenerId(0)), Ok(None));
@@ -468,14 +468,14 @@ mod tests {
             listeners: vec![
                 ListenerConfig {
                     timeout_seconds: 300,
-                    on_timeout: Some("sweetslock".to_string()),
+                    on_timeout: Some("veila lock --wait-ready".to_string()),
                     on_resume: None,
                     ignore_inhibit: true,
                 },
                 ListenerConfig {
                     timeout_seconds: 600,
-                    on_timeout: Some("sweetsmsg output '*' power off".to_string()),
-                    on_resume: Some("sweetsmsg output '*' power on".to_string()),
+                    on_timeout: Some("sweets msg output-power '*' off".to_string()),
+                    on_resume: Some("sweets msg output-power '*' on".to_string()),
                     ignore_inhibit: false,
                 },
             ],

@@ -152,8 +152,8 @@ Defaults to false.
 .SH EXAMPLE CONFIGURATION
 .EX
 [general]
-lock_command = "sweetslock"
-before_sleep_command = "sweetslock --daemonize"
+lock_command = "veila lock --wait-ready"
+before_sleep_command = "veila lock --wait-ready"
 wait_before_sleep = true
 
 [idle_hint]
@@ -161,13 +161,13 @@ timeout = 300
 
 [[listener]]
 timeout = 300
-on_timeout = "sweetslock"
+on_timeout = "veila lock --wait-ready"
 ignore_inhibit = true
 
 [[listener]]
 timeout = 600
-on_timeout = "sweetsmsg output '*' power off"
-on_resume = "sweetsmsg output '*' power on"
+on_timeout = "sweets msg output-power '*' off"
+on_resume = "sweets msg output-power '*' on"
 .EE
 .SH INHIBITORS
 Listeners respect compositor, ScreenSaver D-Bus, and systemd-logind

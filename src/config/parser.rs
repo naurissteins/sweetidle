@@ -184,10 +184,10 @@ mod tests {
     fn parses_general_idle_hint_and_listeners() {
         let source = r#"
 [general]
-lock_command = "sweetslock"
-unlock_command = "sweetslockctl unlock"
-before_sleep_command = "sweetslock --daemonize"
-after_resume_command = "sweetsmsg output '*' power on"
+lock_command = "veila lock --wait-ready"
+unlock_command = "your-locker-control unlock"
+before_sleep_command = "veila lock --wait-ready"
+after_resume_command = "sweets msg output-power '*' on"
 wait_before_sleep = true
 ignore_dbus_inhibit = false
 ignore_systemd_inhibit = true
@@ -197,21 +197,24 @@ timeout = 300
 
 [[listener]]
 timeout = 300
-on_timeout = "sweetslock"
+on_timeout = "veila lock --wait-ready"
 ignore_inhibit = true
 
 [[listener]]
 timeout = 600
-on_timeout = "sweetsmsg output '*' power off"
-on_resume = "sweetsmsg output '*' power on"
+on_timeout = "sweets msg output-power '*' off"
+on_resume = "sweets msg output-power '*' on"
 "#;
 
         let config = Config::parse(source).unwrap_or_else(|error| panic!("{error}"));
 
-        assert_eq!(config.general.lock_command.as_deref(), Some("sweetslock"));
+        assert_eq!(
+            config.general.lock_command.as_deref(),
+            Some("veila lock --wait-ready")
+        );
         assert_eq!(
             config.general.unlock_command.as_deref(),
-            Some("sweetslockctl unlock")
+            Some("your-locker-control unlock")
         );
         assert!(config.general.wait_before_sleep);
         assert!(config.general.ignore_systemd_inhibit);
@@ -222,7 +225,7 @@ on_resume = "sweetsmsg output '*' power on"
         assert!(!config.listeners[1].ignore_inhibit);
         assert_eq!(
             config.listeners[1].on_resume.as_deref(),
-            Some("sweetsmsg output '*' power on")
+            Some("sweets msg output-power '*' on")
         );
     }
 
@@ -247,7 +250,7 @@ on_resume = "sweetsmsg output '*' power on"
     fn partial_general_table_keeps_explicit_values_and_defaults_omitted_fields() {
         let source = r#"
 [general]
-lock_command = "  sweetslock  "
+lock_command = "  veila lock --wait-ready  "
 wait_before_sleep = false
 ignore_dbus_inhibit = true
 ignore_systemd_inhibit = true
@@ -258,7 +261,7 @@ ignore_systemd_inhibit = true
             config,
             Config {
                 general: GeneralConfig {
-                    lock_command: Some("sweetslock".to_string()),
+                    lock_command: Some("veila lock --wait-ready".to_string()),
                     wait_before_sleep: false,
                     ignore_dbus_inhibit: true,
                     ignore_systemd_inhibit: true,
@@ -295,7 +298,7 @@ ignore_systemd_inhibit = true
 
     #[test]
     fn rejects_missing_listener_timeout() {
-        let error = parse_error("[[listener]]\non_timeout = \"sweetslock\"\n");
+        let error = parse_error("[[listener]]\non_timeout = \"veila lock --wait-ready\"\n");
 
         assert_eq!(
             error,
