@@ -4,6 +4,8 @@ Documentation=https://github.com/naurissteins/sweetidle
 PartOf=graphical-session.target
 After=graphical-session.target
 ConditionEnvironment=WAYLAND_DISPLAY
+StartLimitIntervalSec=60s
+StartLimitBurst=10
 
 [Service]
 Type=exec
@@ -11,7 +13,7 @@ ExecStart=sweetidle
 ExecReload=kill -HUP $MAINPID
 KillMode=process
 Restart=on-failure
-RestartSec=1s
+RestartSec=2s
 TimeoutStopSec=5s
 
 [Install]
