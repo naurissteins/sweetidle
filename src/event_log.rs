@@ -83,6 +83,14 @@ pub(super) fn handle_runtime_event(event: RuntimeEvent) -> RuntimeControl {
             debug!(cookie, application, reason, active_count, "{message}");
             RuntimeControl::Continue
         }
+        RuntimeEvent::DbusInhibitUnavailable(error) => {
+            // other compositor owns the name and applies these inhibitors itself, so this is a normal setup
+            info!(
+                error = %error,
+                "another service owns the ScreenSaver D-Bus name, leaving D-Bus inhibitors to it"
+            );
+            RuntimeControl::Continue
+        }
         RuntimeEvent::DbusInhibitorOwnerDisconnected {
             owner,
             released_count,

@@ -69,6 +69,12 @@ impl DbusInhibitMonitor {
     }
 }
 
+impl DbusInhibitError {
+    pub(crate) fn is_name_taken(&self) -> bool {
+        matches!(self, Self::OwnName(source) if matches!(**source, zbus::Error::NameTaken))
+    }
+}
+
 impl From<WorkerError> for DbusInhibitError {
     fn from(error: WorkerError) -> Self {
         match error {
@@ -380,7 +386,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::{DbusInhibitEvent, DbusInhibitMonitor};
+    use super::{DbusInhibitError, DbusInhibitEvent, DbusInhibitMonitor};
 
     #[zbus::proxy(
         interface = "org.freedesktop.ScreenSaver",
@@ -393,6 +399,13 @@ mod tests {
 
         #[zbus(name = "UnInhibit")]
         fn un_inhibit(&self, cookie: u32) -> zbus::Result<()>;
+    }
+
+    #[test]
+    fn only_a_taken_name_counts_as_name_taken() {
+        assert!(DbusInhibitError::OwnName(Box::new(zbus::Error::NameTaken)).is_name_taken());
+        assert!(!DbusInhibitError::OwnName(Box::new(zbus::Error::InvalidReply)).is_name_taken());
+        assert!(!DbusInhibitError::Disconnected.is_name_taken());
     }
 
     #[test]

@@ -26,7 +26,9 @@ use crate::{
     config::{Config, ConfigLoadError},
     control::ControlMonitor,
     listener::{ListenerError, ListenerSet},
-    session::{DbusInhibitMonitor, LogindFeatures, LogindMonitor, SystemdIdleInhibitor},
+    session::{
+        DbusInhibitError, DbusInhibitMonitor, LogindFeatures, LogindMonitor, SystemdIdleInhibitor,
+    },
     wayland::IdleWaylandParts,
 };
 
@@ -58,6 +60,7 @@ pub enum RuntimeEvent {
         reason: String,
         active_count: usize,
     },
+    DbusInhibitUnavailable(DbusInhibitError),
     DbusInhibitorOwnerDisconnected {
         owner: String,
         released_count: usize,
@@ -127,18 +130,32 @@ impl IdleRuntime {
             .map_err(|error| RuntimeError::RegisterWayland(error.error))?;
         let (reload, reload_requester) = register_reload(config_path, &event_loop)?;
         let logind = register_logind(config, &event_loop)?;
-        let dbus_inhibit = register_dbus_inhibit(config, &event_loop)?;
+        let mut state = RuntimeState::new(parts.state, listeners, config, Some(reload_requester));
+        let dbus_inhibit = match register_dbus_inhibit(config, &event_loop) {
+            Ok(monitor) => monitor,
+            // another ScreenSaver service owns the name, and idle handling works without it
+            Err(RuntimeError::DbusInhibit(error)) if error.is_name_taken() => {
+                state.push_runtime_event(RuntimeEvent::DbusInhibitUnavailable(error));
+                None
+            }
+            Err(error) => return Err(error),
+        };
 
         Ok(Self {
             event_loop,
             connection,
-            state: RuntimeState::new(parts.state, listeners, config, Some(reload_requester)),
+            state,
             integration_features: IntegrationFeatures::from_config(config),
             _reload: reload,
             logind,
             _dbus_inhibit: dbus_inhibit,
             _control: control,
         })
+    }
+
+    #[must_use = "startup events must be handled"]
+    pub fn take_startup_events(&mut self) -> Vec<RuntimeEvent> {
+        self.state.take_runtime_events()
     }
 
     pub fn dispatch(

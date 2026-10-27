@@ -75,6 +75,9 @@ fn run_daemon(path: Option<PathBuf>, verbose: bool) -> Result<(), String> {
         idle_hint_timeout_seconds = ?active_config.idle_hint_timeout_seconds,
         "sweetidle started"
     );
+    for event in runtime.take_startup_events() {
+        handle_runtime_event(event);
+    }
 
     // the runtime blocks until an event wakes this loop
     loop {
