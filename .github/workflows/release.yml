@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # publish assets for a tag that already exists
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  release:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify the tag matches Cargo.toml
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          if [ "${TAG#v}" != "$version" ]; then
+            printf 'tag %s does not match package version %s\n' "$TAG" "$version" >&2
+            exit 1
+          fi
+
+      - name: Build
+        run: cargo build --locked --release
+
+      - name: Create binary tarball
+        run: |
+          name="sweetidle-${TAG#v}-x86_64-linux.tar.xz"
+          stage="$(mktemp -d)"
+          install -Dm755 target/release/sweetidle "$stage/usr/bin/sweetidle"
+          install -Dm644 systemd/sweetidle.service "$stage/usr/lib/systemd/user/sweetidle.service"
+          install -Dm644 man/sweetidle.1 "$stage/usr/share/man/man1/sweetidle.1"
+          install -Dm644 config/example.toml "$stage/usr/share/doc/sweetidle/example.toml"
+          install -Dm644 README.md "$stage/usr/share/doc/sweetidle/README.md"
+          # archive the usr/ prefix itself so it unpacks straight over /
+          mkdir dist
+          tar -C "$stage" --owner=0 --group=0 -cJf "dist/$name" usr
+          cd dist
+          sha256sum "$name" > "$name.sha256sum"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # re-runs replace the assets instead of failing on an existing release
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" --clobber dist/*
+          else
+            gh release create "$TAG" --title "sweetidle $TAG" --generate-notes --verify-tag dist/*
+          fi
