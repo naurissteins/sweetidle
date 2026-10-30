@@ -4,8 +4,8 @@
 
 ![GitHub last commit](https://img.shields.io/github/last-commit/naurissteins/sweetidle?style=for-the-badge&labelColor=181825&color=a6e3a1)
 ![GitHub repo size](https://img.shields.io/github/repo-size/naurissteins/sweetidle?style=for-the-badge&labelColor=181825&color=d3bfe6)
-![AUR Version](https://img.shields.io/aur/version/sweetidle?style=for-the-badge&labelColor=181825&color=b4befe)
-![GitHub Repo stars](https://img.shields.io/github/stars/naurissteins/sweetidle?style=for-the-badge&labelColor=181825&color=f9e2af)
+![AUR Version](https://img.shields.io/aur/version/sweetidle-bin?style=for-the-badge&labelColor=181825&color=b4befe)
+![GitHub Repo stars](https://img.shields.io/github/stars/sweetwm/sweetidle?style=for-the-badge&labelColor=181825&color=f9e2af)
 
 Lightweight and powerful idle daemon for Wayland compositors
 
@@ -156,7 +156,3 @@ Logs:
 ```bash
 journalctl --user -u sweetidle.service -f
 ```
-
-## License
-
-[GPL-3.0-or-later](LICENSE)
